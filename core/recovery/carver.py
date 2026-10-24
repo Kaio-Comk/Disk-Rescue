@@ -25,6 +25,7 @@ class CarvedFile:
     start_lba: int
     size_bytes: int
     saved_path: Path
+    is_structurally_valid: bool = True
 
 
 class FileCarver:
@@ -39,9 +40,37 @@ class FileCarver:
     def __init__(self, device_path: str, output_dir: Path):
         self.device_path = device_path
         self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
         self.recovered_files: List[CarvedFile] = []
         self.cancel_requested = False
+
+        # Validação de segurança P0: Impedir salvar no próprio disco sob análise
+        clean_dev = device_path.replace("\\\\.\\", "").replace("\\", "/").strip().lower()
+        clean_out = str(self.output_dir.resolve()).replace("\\", "/").lower()
+        if clean_dev and (clean_dev == clean_out or clean_out.startswith(clean_dev)):
+            raise ValueError(f"A pasta de destino do carving não pode ser o dispositivo de origem: {device_path}")
+
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def verify_file_integrity(file_path: Path, kind: str) -> bool:
+        """Valida a integridade estrutural após a extração."""
+        try:
+            if kind == "ZIP":
+                import zipfile
+                with zipfile.ZipFile(file_path, "r") as zf:
+                    return zf.testzip() is None
+            elif kind == "PDF":
+                data = file_path.read_bytes()
+                return data.startswith(b"%PDF-") and (b"%%EOF" in data[-1024:] or b"startxref" in data[-2048:])
+            elif kind == "PNG":
+                data = file_path.read_bytes()
+                return data.startswith(b"\x89PNG\r\n\x1a\n") and b"IEND" in data[-32:]
+            elif kind == "JPEG":
+                data = file_path.read_bytes()
+                return data.startswith(b"\xff\xd8\xff") and data.endswith(b"\xff\xd9")
+            return True
+        except Exception:
+            return False
 
     def cancel(self):
         self.cancel_requested = True
@@ -98,16 +127,18 @@ class FileCarver:
                                     out_file = self.output_dir / out_name
                                     out_file.write_bytes(data[idx : idx + file_len])
 
+                                    is_valid = self.verify_file_integrity(out_file, kind)
                                     carved = CarvedFile(
                                         file_id=file_counter,
                                         file_type=kind,
                                         extension=ext,
                                         start_lba=file_lba,
                                         size_bytes=file_len,
-                                        saved_path=out_file
+                                        saved_path=out_file,
+                                        is_structurally_valid=is_valid
                                     )
                                     self.recovered_files.append(carved)
-                                    log.info("Arquivo resgatado: %s (%s, %d bytes) no LBA %d", out_name, kind, file_len, file_lba)
+                                    log.info("Arquivo resgatado: %s (%s, %d bytes, íntegro=%s) no LBA %d", out_name, kind, file_len, is_valid, file_lba)
                                     pos = footer_idx + len(footer_sig)
 
                     # Guarda os últimos 4KB para não perder cabeçalhos partidos entre chunks

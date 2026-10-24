@@ -1,14 +1,14 @@
 # 🛠️ DiskRescue
 
 [![Release](https://img.shields.io/github/v/release/Kaio-Comk/Disk-Rescue?color=blue&label=Vers%C3%A3o)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)
-[![Tests](https://img.shields.io/badge/Testes-15%2F15%20Aprovados-success)](https://github.com/Kaio-Comk/Disk-Rescue)
+[![Tests](https://img.shields.io/badge/Testes-19%2F19%20Aprovados-success)](https://github.com/Kaio-Comk/Disk-Rescue)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-blue?logo=python)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Plataforma-Windows%2011%20Fluent-0078d4?logo=windows)](https://github.com/Kaio-Comk/Disk-Rescue)
 [![License](https://img.shields.io/badge/Licen%C3%A7a-MIT-green)](LICENSE)
 
 **Sistema Unificado e Autônomo para Diagnóstico Profundo, Clonagem Resiliente e Recuperação Forense de Discos.**
 
-O **DiskRescue** é uma suíte de engenharia reversa e recuperação de dados projetada para HDDs, SSDs, pendrives e mídias removíveis. Ele combina análise estrutural de baixo nível (parsers nativos de MBR, GPT, NTFS, FAT32 e exFAT), telemetria S.M.A.R.T. preditiva com isolamento de falhas de cabo SATA, motor de clonagem em duas fases (estilo GNU `ddrescue`), raspagem direta de arquivos (*File Carving*) e visualização gráfica de latência de superfície (*Heatmap*).
+O **DiskRescue** é uma suíte de engenharia reversa e recuperação de dados projetada para HDDs, SSDs, pendrives e mídias removíveis. Ele combina análise estrutural de baixo nível (parsers nativos de MBR, GPT, NTFS, FAT32 e exFAT), telemetria S.M.A.R.T. preditiva com isolamento de falhas de cabo SATA, motor de clonagem em duas fases (estilo GNU `ddrescue`), raspagem direta de arquivos (*File Carving*) com validação estrutural pós-extração e visualização gráfica de latência de superfície (*Heatmap*).
 
 A aplicação conta com uma interface desktop moderna no padrão **Windows 11 Fluent Design** e é distribuída como binário portátil autônomo (`DiskRescue.exe`) com solicitação nativa de privilégios de administrador (UAC).
 
@@ -20,6 +20,10 @@ Baixe a versão mais recente pronta para uso:
 👉 **[Baixar DiskRescue v0.2.0 (Executável Portátil)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)**
 
 * **Portátil e Autônomo:** Não requer instalação de Python nem dependências externas (~11.6 MB).
+* **Integridade Criptográfica (SHA-256):**
+  ```text
+  9847DE22F57A62BE8057FFA722052B30683F71CB70AC56C91B42F720C96CAEBD
+  ```
 * **Elevação UAC Automática:** Manifest embutido solicita privilégios de Administrador ao iniciar, garantindo acesso direto de baixo nível (`\\.\PhysicalDriveX`).
 
 ---
@@ -68,8 +72,8 @@ flowchart TD
     end
 
     subgraph HardwareLayer ["Dispositivos Físicos"]
-        RawDisk["Disco com Defeito (\\\\.\\PhysicalDriveX)"]
-        SafeTarget["Disco de Destino / Arquivo de Imagem (.img)"]
+        RawDisk["Disco com Defeito - PhysicalDriveX"]
+        SafeTarget["Disco de Destino - Arquivo de Imagem .img"]
     end
 
     GUI --> Orquestrador
@@ -154,9 +158,11 @@ flowchart TD
 ## 🛡️ Política de Segurança Inviolável (*Do No Harm*)
 
 O DiskRescue foi concebido com foco absoluto na integridade física e preservação dos dados:
-1. **Snapshots Preventivos Obrigatórios:** Nenhuma gravação de setor físico é executada sem que uma cópia binária exata do setor original seja gravada no disco local (`mbr_backup_*.bin`, `ntfs_vbr_backup_*.bin`).
-2. **Escrita Exclusiva em Mídia de Destino:** Arquivos recuperados por Carving e imagens de clonagem são salvos obrigatoriamente em outra unidade de armazenamento.
-3. **Cancelamento Gracioso:** Todas as threads de clonagem, varredura de superfície e carving respondem a sinais de cancelamento imediato sem corromper arquivos parciais.
+1. **Modo Somente Leitura por Padrão (Write-Blocker):** Ferramentas de diagnóstico, telemetria SMART, varredura de superfície e carving operam com leitura estrita e são testadas para garantir que nunca disparam escritas na mídia sob análise.
+2. **Bloqueio P0 de Origem e Destino:** O sistema valida identificadores e impede categoricamente que a imagem de saída ou pasta de carving coincidam com o dispositivo de origem.
+3. **Snapshots Preventivos Obrigatórios:** Nenhuma gravação de setor físico é executada sem que uma cópia binária exata do setor original seja gravada no disco local (`mbr_backup_*.bin`, `ntfs_vbr_backup_*.bin`).
+4. **Validação Estrutural Pós-Carving:** Arquivos resgatados passam por checagem de integridade (estrutura ZIP, marcadores PDF e delimitadores de imagem) para minimizar falsos positivos.
+5. **Cancelamento Gracioso:** Todas as threads de clonagem, varredura de superfície e carving respondem a sinais de interrupção imediata preservando o progresso salvo.
 
 ---
 
@@ -167,23 +173,27 @@ O sistema conta com suíte completa de testes unitários automatizados com disco
 ```bash
 $ pytest tests/ -v
 ============================= test session starts =============================
-tests/test_carver.py::test_carver_detects_and_extracts_files PASSED      [  6%]
-tests/test_fat_exfat.py::test_parse_fat32_and_exfat PASSED               [ 13%]
-tests/test_fat_exfat.py::test_scan_boot_sectors_discovers_fat32_and_exfat PASSED [ 20%]
-tests/test_gpt_repair.py::test_parse_gpt_valida_crc PASSED               [ 26%]
-tests/test_gpt_repair.py::test_rebuild_gpt_corrige_offset_e_recalcula_crc PASSED [ 33%]
-tests/test_mbr.py::test_parse_and_rebuild_mbr PASSED                     [ 40%]
-tests/test_mbr.py::test_repair_mbr_partition_in_file PASSED              [ 46%]
-tests/test_ntfs_boot_repair.py::test_diagnose_and_restore_ntfs_boot_sector PASSED [ 53%]
-tests/test_resilient_clone.py::test_resilient_clone_clean_disk PASSED    [ 60%]
-tests/test_resilient_clone.py::test_resilient_clone_with_bad_sectors_skip_and_scrape PASSED [ 66%]
-tests/test_smart_diagnostics.py::test_smart_healthy PASSED               [ 73%]
-tests/test_smart_diagnostics.py::test_smart_sata_cable_fault_detected PASSED [ 80%]
-tests/test_smart_diagnostics.py::test_smart_surface_critical_degradation PASSED [ 86%]
-tests/test_smart_diagnostics.py::test_smart_mechanical_spin_retry PASSED [ 93%]
+tests/test_carver.py::test_carver_detects_and_extracts_files PASSED      [  5%]
+tests/test_fat_exfat.py::test_parse_fat32_and_exfat PASSED               [ 10%]
+tests/test_fat_exfat.py::test_scan_boot_sectors_discovers_fat32_and_exfat PASSED [ 15%]
+tests/test_gpt_repair.py::test_parse_gpt_valida_crc PASSED               [ 21%]
+tests/test_gpt_repair.py::test_rebuild_gpt_corrige_offset_e_recalcula_crc PASSED [ 26%]
+tests/test_mbr.py::test_parse_and_rebuild_mbr PASSED                     [ 31%]
+tests/test_mbr.py::test_repair_mbr_partition_in_file PASSED              [ 36%]
+tests/test_ntfs_boot_repair.py::test_diagnose_and_restore_ntfs_boot_sector PASSED [ 42%]
+tests/test_resilient_clone.py::test_resilient_clone_clean_disk PASSED    [ 47%]
+tests/test_resilient_clone.py::test_resilient_clone_with_bad_sectors_skip_and_scrape PASSED [ 52%]
+tests/test_safety_write_blocker.py::test_diagnostic_and_carver_scans_never_write_to_source PASSED [ 57%]
+tests/test_safety_write_blocker.py::test_cloner_blocks_same_source_and_destination PASSED [ 63%]
+tests/test_safety_write_blocker.py::test_carver_blocks_output_dir_on_source PASSED [ 68%]
+tests/test_safety_write_blocker.py::test_carver_structural_integrity_verification PASSED [ 73%]
+tests/test_smart_diagnostics.py::test_smart_healthy PASSED               [ 78%]
+tests/test_smart_diagnostics.py::test_smart_sata_cable_fault_detected PASSED [ 84%]
+tests/test_smart_diagnostics.py::test_smart_surface_critical_degradation PASSED [ 89%]
+tests/test_smart_diagnostics.py::test_smart_mechanical_spin_retry PASSED [ 94%]
 tests/test_surface_scan.py::test_surface_scan_measures_blocks PASSED     [100%]
 
-============================= 15 passed in 3.91s ==============================
+============================= 19 passed in 4.70s ==============================
 ```
 
 ---
@@ -194,14 +204,14 @@ tests/test_surface_scan.py::test_surface_scan_measures_blocks PASSED     [100%]
 * Python 3.11 ou 3.12 (64-bit) no Windows.
 
 ### Configuração do Ambiente
-```bash
+```powershell
 # 1. Clonar o repositório
 git clone https://github.com/Kaio-Comk/Disk-Rescue.git
 cd Disk-Rescue
 
-# 2. Criar e ativar ambiente virtual
+# 2. Criar e ativar ambiente virtual (PowerShell)
 python -m venv .venv
-.venv\Scripts\activate
+.\.venv\Scripts\Activate.ps1
 
 # 3. Instalar dependências em modo editável
 pip install -e ".[gui,dev]"

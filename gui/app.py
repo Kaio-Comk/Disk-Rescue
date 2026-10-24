@@ -759,10 +759,16 @@ class DiskRescueApp:
         if not self.selected_disk or not self.misaligned_pair:
             return
         part_idx, fs = self.misaligned_pair
-        if not messagebox.askyesno("Confirmar Reparo", f"Realinhar Partição {part_idx} para o LBA {fs.start_lba:,}?"):
-            return
-
         target_disk = self.selected_disk
+
+        if not messagebox.askyesno(
+            "⚠️ Confirmação Crítica de Reparo",
+            f"Você está prestes a regravar a tabela de partições do disco {target_disk.name} ({target_disk.device_path}).\n\n"
+            f"Alinhamento: Partição {part_idx} -> Novo LBA {fs.start_lba:,}.\n\n"
+            f"Um snapshot binário preventivo (LBA 0..33) será gravado em backups/ antes da alteração.\n\n"
+            f"Deseja prosseguir com a gravação física?"
+        ):
+            return
 
         def worker():
             res = repair_gpt_partition_offset(target_disk.device_path, part_idx, fs)
@@ -791,9 +797,17 @@ class DiskRescueApp:
             messagebox.showwarning("Aviso", "Defina o arquivo de imagem de destino.")
             return
 
+        target_disk = self.selected_disk
+
+        # Validação P0 de segurança: impedir que origem e destino sejam o mesmo
+        clean_dev = target_disk.device_path.replace("\\\\.\\", "").replace("\\", "/").lower()
+        clean_dst = str(Path(dest).resolve()).replace("\\", "/").lower()
+        if clean_dev and (clean_dev == clean_dst or clean_dst.endswith(clean_dev)):
+            messagebox.showerror("Bloqueio de Segurança P0", "A origem e o destino não podem ser o mesmo dispositivo!")
+            return
+
         self.btn_start_clone.config(state=tk.DISABLED)
         self.btn_cancel_clone.config(state=tk.NORMAL)
-        target_disk = self.selected_disk
         total_sectors = target_disk.size_bytes // 512
 
         cloner = ResilientCloner(target_disk.device_path, Path(dest), total_sectors)
@@ -836,7 +850,20 @@ class DiskRescueApp:
         if not self.selected_disk:
             messagebox.showwarning("Aviso", "Selecione um disco de origem.")
             return
-        out_path = Path(self.txt_carve_dir.get().strip())
+        out_str = self.txt_carve_dir.get().strip()
+        if not out_str:
+            messagebox.showwarning("Aviso", "Defina a pasta de destino do carving.")
+            return
+        out_path = Path(out_str)
+        target_disk = self.selected_disk
+
+        # Validação P0 de segurança: impedir salvar na própria origem
+        clean_dev = target_disk.device_path.replace("\\\\.\\", "").replace("\\", "/").lower()
+        clean_out = str(out_path.resolve()).replace("\\", "/").lower()
+        if clean_dev and (clean_dev == clean_out or clean_out.startswith(clean_dev)):
+            messagebox.showerror("Bloqueio de Segurança P0", "A pasta de destino do carving não pode ser o dispositivo de origem!")
+            return
+
         out_path.mkdir(parents=True, exist_ok=True)
 
         for item in self.carver_tree.get_children():
@@ -844,7 +871,6 @@ class DiskRescueApp:
 
         self.btn_start_carve.config(state=tk.DISABLED)
         self.set_status("File Carving em execução...")
-        target_disk = self.selected_disk
         carver = FileCarver(target_disk.device_path, out_path)
 
         def progress_cb(cur, total, count):

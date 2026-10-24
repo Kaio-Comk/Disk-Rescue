@@ -97,6 +97,28 @@ class ResilientCloner:
         self.map_path = map_path or self.output_image_path.with_suffix(".map")
         self.cancel_requested = False
 
+        # Validação de segurança P0: Impedir que origem e destino sejam o mesmo dispositivo
+        clean_dev = device_path.replace("\\\\.\\", "").replace("\\", "/").strip().lower()
+        clean_dst = str(self.output_image_path.resolve()).replace("\\", "/").lower()
+        if clean_dev and (clean_dev == clean_dst or clean_dst.endswith(clean_dev)):
+            raise ValueError(f"Origem e destino não podem ser o mesmo dispositivo: {device_path}")
+
+        # Verifica espaço em disco disponível no destino
+        try:
+            import shutil
+            target_parent = self.output_image_path.parent
+            target_parent.mkdir(parents=True, exist_ok=True)
+            free_bytes = shutil.disk_usage(target_parent).free
+            needed_bytes = total_sectors * SECTOR_SIZE
+            if free_bytes < needed_bytes:
+                log.warning(
+                    "Espaço livre no destino (%s MB) é menor que o tamanho estimado da imagem (%s MB).",
+                    free_bytes // (1024 * 1024),
+                    needed_bytes // (1024 * 1024)
+                )
+        except Exception as exc:
+            log.debug("Não foi possível verificar espaço livre no destino: %s", exc)
+
         # Tenta carregar mapa prévio para retomada (resume)
         loaded = CloneMap.load_map(self.map_path) if self.map_path.exists() else None
         if loaded and loaded.total_sectors == total_sectors:

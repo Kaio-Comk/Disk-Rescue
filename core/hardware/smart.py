@@ -101,11 +101,11 @@ def analyze_smart_data(
     if crc_err > 0 and reallocated == 0 and pending == 0 and uncorrectable == 0:
         risk = SmartRiskLevel.YELLOW
         messages.append(
-            f"🔍 FALHA DE CABO SATA / CONEXÃO: Detectados {crc_err} erros de CRC UltraDMA (ID 199/C7). "
-            "A superfície dos pratos e a cabeça do HD estão 100% saudáveis! O problema é apenas "
-            "interferência elétrica no cabo SATA ou mau contato na porta. Substitua o cabo de dados SATA."
+            f"🔍 INDÍCIO DE PROBLEMA DE CABO/INTERFACE: Detectados {crc_err} erros de CRC UltraDMA (ID 199/C7). "
+            "Não foram observados setores pendentes ou realocados até o momento. Alta probabilidade de falha "
+            "elétrica no cabo de dados SATA ou mau contato na porta. Recomenda-se substituir o cabo SATA e monitorar a integridade."
         )
-        recommendation = "Substitua o cabo SATA ou conecte em outra porta da placa-mãe. Não condene o disco."
+        recommendation = "Substitua o cabo SATA ou conecte em outra porta da placa-mãe. Não condene o disco sem antes testar a superfície."
 
     # Regra 2: Degradação de Superfície / Bad Sectors
     if pending > 0 or reallocated > 0 or uncorrectable > 0:
