@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "diskrescue"
+version = "0.1.0"
+description = "Sistema unificado e autônomo para diagnóstico e recuperação de discos."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Kaio Lima" }
+]
+dependencies = [
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[project.scripts]
+diskrescue = "cli.main:main"
