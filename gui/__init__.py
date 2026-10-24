@@ -1,0 +1,1 @@
+"""DiskRescue GUI package."""

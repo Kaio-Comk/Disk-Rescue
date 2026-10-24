@@ -1,17 +1,41 @@
 # 🛠️ DiskRescue
 
-**Sistema Unificado e Autônomo para Diagnóstico Profundo e Recuperação de Discos.**
+**Sistema Unificado e Autônomo para Diagnóstico Profundo e Recuperação Forense de Discos.**
 
-O **DiskRescue** é uma suíte em Python para análise forense, diagnóstico de saúde físico-lógica e reparo automatizado não destrutivo de discos rígidos (HDDs), SSDs e mídias removíveis (USB/Cartões SD).
+O **DiskRescue** é uma suíte forense para análise, diagnóstico de saúde físico-lógica e reparo automatizado não destrutivo de discos rígidos (HDDs), SSDs e mídias removíveis (USB/Cartões SD), com interface gráfica moderna no padrão **Windows 11 Fluent Design** e binário executável portátil (`.exe`).
 
 ---
 
-## 🎯 Por que o DiskRescue?
+## 💻 Aplicativo Desktop Portátil (`DiskRescue.exe`)
 
-* **Diagnóstico Automatizado em Camadas:** Identifica em segundos a causa raiz exata do problema (hardware, SMART, partição deslocada, boot sector corrompido ou bad sectors).
-* **Segurança "Do No Harm":** 100% somente-leitura por padrão. Se houver reparo in-place de tabela de partição, cria backup de cada LBA antes de gravar 1 byte.
-* **Sem Varreduras Destrutivas:** Diferente de softwares comerciais que forçam o disco morrendo, o DiskRescue detecta falhas mecânicas e redireciona direto para clonagem de emergência (*ddrescue*).
-* **Resolução Cirúrgica Instantânea:** Partições que o Windows enxerga como RAW por causa de ponteiros GPT deslocados ou boot sectors corrompidos são recuperadas em menos de 2 segundos.
+O executável pré-compilado está pronto em:
+```
+dist/DiskRescue.exe
+```
+
+* **Sem necessidade de instalar Python** ou dependências.
+* **Elevação UAC Automática:** Manifest embutido solicita privilégios de Administrador ao iniciar, garantindo acesso raw imediato aos setores físicos dos discos.
+* **Visual Moderno e Limpo:** Interface com tema Sun Valley escuro/claro, cartões informativos, abas operacionais e terminal forense em tempo real.
+
+---
+
+## 🎯 Capacidades do Sistema
+
+* **🔍 Diagnóstico de Geometria & Reparo In-Place:**
+  * Lê e valida tabelas **GPT** primárias e secundárias com verificação de **CRC32**.
+  * Varre setores físicos em busca de **Boot Sectors reais e Master File Table ($MFT)**.
+  * Detecta partições reportadas como **RAW** pelo Windows por ponteiros desalinhados e aplica **reparo cirúrgico com snapshot de segurança** automático.
+
+* **📊 Telemetria de Confiabilidade & SMART:**
+  * Monitoramento direto de temperatura (°C), erros totais de leitura/gravação, desgaste e status de integridade física.
+  * Diretrizes de segurança (*"Do No Harm"*): trava operações arriscadas se a integridade física estiver degradada.
+
+* **💾 Imagem Forense Byte-a-Byte (.img):**
+  * Cria uma cópia espelho completa da mídia com progresso em tempo real (setores, velocidade em MB/s e tempo estimado).
+  * Permite trabalhar na imagem virtual sem estressar ou degradar o disco físico original.
+
+* **📝 Terminal de Log Forense:**
+  * Registro detalhado de cada LBA inspecionado, cálculo de checksums e eventos de montagem, com exportação para arquivo `.txt`.
 
 ---
 
@@ -20,20 +44,31 @@ O **DiskRescue** é uma suíte em Python para análise forense, diagnóstico de 
 ```
 DiskRescue/
 ├── core/
-│   ├── hardware/       # Descoberta de dispositivos, barramento e SMART
-│   ├── partition/      # Parsers e construtores de MBR e GPT (com validação CRC32)
-│   ├── filesystem/     # Scanners de Boot Sectors (NTFS, FAT32, exFAT, EXT4) e MFT
-│   └── recovery/       # Snapshots de LBA, reparo in-place e orquestrador ddrescue
+│   ├── hardware/       # Descoberta de dispositivos, barramento, SMART e elevação
+│   ├── partition/      # Parsers e reconstrutores GPT com recálculo CRC32
+│   ├── filesystem/     # Scanners de Boot Sectors (NTFS/MFT)
+│   └── recovery/       # Snapshots de LBA, reparo in-place e imagem forense raw
+├── gui/                # Interface Desktop moderna com tema Sun Valley
+│   └── app.py          # Dashboard com abas de Diagnóstico, SMART, Clone e Logs
 ├── cli/                # Interface interativa de linha de comando
-├── tools/              # Ferramentas auxiliares de dump e inspeção
-└── tests/              # Testes unitários com fixtures e discos sintéticos
+├── dist/
+│   └── DiskRescue.exe  # Executável portátil para Windows
+├── diskrescue_gui.pyw  # Ponto de entrada gráfico
+└── tests/              # Testes unitários com discos sintéticos
 ```
 
 ---
 
 ## 🚀 Como Executar
 
+### Opção 1: Executável Portátil (Recomendado)
+Dê um duplo-clique em `dist/DiskRescue.exe` (confirme a permissão de Administrador do Windows).
+
+### Opção 2: Via Python
 ```bash
-# Executar a CLI interativa (requer privilégio de Administrador/root para acesso raw aos discos)
+# Executar a interface gráfica moderna
+python diskrescue_gui.pyw
+
+# Ou executar a interface via terminal
 python -m cli.main
 ```

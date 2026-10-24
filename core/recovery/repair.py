@@ -117,3 +117,63 @@ def repair_gpt_partition_offset(
     except Exception as exc:
         log.error("Exceção ao reparar tabela GPT: %s", exc)
         return RepairResult(success=False, message=f"Erro durante a gravação: {exc}", backup_file=backup_path)
+
+
+def create_raw_disk_image(
+    device_path: str,
+    output_path: Path,
+    sector_size: int = DEFAULT_SECTOR_SIZE,
+    max_sectors: int | None = None,
+    chunk_sectors: int = 2048,
+    progress_cb=None,
+    cancel_check=None
+) -> bool:
+    """Cria uma imagem binária setor a setor da mídia física para análise forense segura."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    chunk_bytes = chunk_sectors * sector_size
+    current_sector = 0
+    t_start = time.time()
+    last_cb_time = t_start
+    bytes_transferred = 0
+
+    try:
+        with open(device_path, "rb") as src, open(output_path, "wb") as dst:
+            while True:
+                if cancel_check and cancel_check():
+                    log.info("Cópia de imagem cancelada pelo usuário.")
+                    return False
+
+                if max_sectors and current_sector >= max_sectors:
+                    break
+
+                to_read = chunk_bytes
+                if max_sectors:
+                    remaining_sectors = max_sectors - current_sector
+                    if remaining_sectors < chunk_sectors:
+                        to_read = remaining_sectors * sector_size
+
+                buf = src.read(to_read)
+                if not buf:
+                    break
+
+                dst.write(buf)
+                sectors_read = len(buf) // sector_size
+                current_sector += sectors_read
+                bytes_transferred += len(buf)
+
+                now = time.time()
+                if progress_cb and (now - last_cb_time >= 0.25):
+                    speed = (bytes_transferred / (1024 * 1024)) / max(0.1, now - t_start)
+                    progress_cb(current_sector, max_sectors or current_sector, speed)
+                    last_cb_time = now
+
+        if progress_cb:
+            now = time.time()
+            speed = (bytes_transferred / (1024 * 1024)) / max(0.1, now - t_start)
+            progress_cb(current_sector, current_sector, speed)
+        return True
+    except Exception as exc:
+        log.error("Erro ao criar imagem forense: %s", exc)
+        return False
+
