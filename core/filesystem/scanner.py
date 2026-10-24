@@ -7,6 +7,10 @@ import logging
 from dataclasses import dataclass
 from typing import Callable
 
+from core.filesystem.fat_exfat import (
+    parse_exfat_boot_sector,
+    parse_fat32_boot_sector,
+)
 from core.filesystem.ntfs import NTFSBootSector, parse_ntfs_boot_sector, verify_ntfs_mft
 
 log = logging.getLogger("diskrescue.scanner")
@@ -86,28 +90,40 @@ def scan_boot_sectors(
                             ))
 
                     # 2. Verifica FAT32
-                    elif sec_data[82:87] == b"FAT32" or sec_data[54:59] == b"FAT16":
-                        label = sec_data[71:82].decode("latin1", errors="ignore").strip()
-                        discovered.append(DiscoveredFilesystem(
-                            fs_type="FAT32",
-                            start_lba=cur_lba,
-                            total_sectors=0,
-                            size_bytes=0,
-                            label=label,
-                            is_verified=True,
-                            details={"oem_id": sec_data[3:11].decode("latin1", errors="ignore")}
-                        ))
+                    elif sec_data[82:87] == b"FAT32":
+                        f32 = parse_fat32_boot_sector(sec_data, cur_lba)
+                        if f32 and f32.is_valid:
+                            label = sec_data[71:82].decode("latin1", errors="ignore").strip()
+                            discovered.append(DiscoveredFilesystem(
+                                fs_type="FAT32",
+                                start_lba=cur_lba,
+                                total_sectors=f32.total_sectors,
+                                size_bytes=f32.total_sectors * f32.bytes_per_sector,
+                                label=label,
+                                is_verified=True,
+                                details={
+                                    "root_cluster": f32.root_cluster,
+                                    "sectors_per_fat": f32.sectors_per_fat,
+                                    "oem_id": sec_data[3:11].decode("latin1", errors="ignore").strip()
+                                }
+                            ))
 
                     # 3. Verifica exFAT
-                    elif sec_data[3:8] == b"EXFAT":
-                        discovered.append(DiscoveredFilesystem(
-                            fs_type="exFAT",
-                            start_lba=cur_lba,
-                            total_sectors=0,
-                            size_bytes=0,
-                            is_verified=True,
-                            details={}
-                        ))
+                    elif sec_data[3:11] == b"EXFAT   ":
+                        exf = parse_exfat_boot_sector(sec_data, cur_lba)
+                        if exf and exf.is_valid:
+                            discovered.append(DiscoveredFilesystem(
+                                fs_type="exFAT",
+                                start_lba=cur_lba,
+                                total_sectors=exf.total_sectors,
+                                size_bytes=exf.total_sectors * exf.bytes_per_sector,
+                                is_verified=True,
+                                details={
+                                    "root_cluster": exf.root_cluster,
+                                    "fat_offset": exf.fat_offset,
+                                    "cluster_heap_offset": exf.cluster_heap_offset
+                                }
+                            ))
 
     except Exception as exc:
         log.error("Erro durante varredura de boot sectors em %s: %s", device_path, exc)
