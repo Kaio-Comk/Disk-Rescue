@@ -29,3 +29,32 @@ jobs:
     - name: Run Test Suite with Pytest
       run: |
         pytest tests/ -v
+
+    - name: Build Portable Executable with PyInstaller
+      if: matrix.python-version == '3.12'
+      run: |
+        pyinstaller DiskRescue.spec --clean --noconfirm
+
+    - name: Verify Executable and Calculate SHA-256
+      if: matrix.python-version == '3.12'
+      shell: powershell
+      run: |
+        if (!(Test-Path "dist\DiskRescue.exe")) {
+          Write-Error "dist\DiskRescue.exe não foi gerado pelo PyInstaller!"
+          exit 1
+        }
+        $hash = (Get-FileHash "dist\DiskRescue.exe" -Algorithm SHA256).Hash
+        Write-Output "DiskRescue.exe SHA-256: $hash"
+
+    - name: Run Smoke Test on Executable
+      if: matrix.python-version == '3.12'
+      run: |
+        .\dist\DiskRescue.exe --smoke-test
+
+    - name: Upload Portable Executable Artifact
+      if: matrix.python-version == '3.12'
+      uses: actions/upload-artifact@v4
+      with:
+        name: DiskRescue-Portable-v0.3.1
+        path: dist\DiskRescue.exe
+        if-no-files-found: error

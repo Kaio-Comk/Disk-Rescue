@@ -87,3 +87,44 @@ def test_create_raw_disk_image_success_with_progress_and_cancel(tmp_path):
         cancel_check=lambda: True
     )
     assert ok_cancel is False
+
+
+def test_create_raw_disk_image_refuses_overwrite_by_default(tmp_path):
+    """P0: Impede que destino existente seja sobrescrito quando allow_overwrite=False (padrão)."""
+    src = tmp_path / "src_data.bin"
+    src.write_bytes(b"\x99" * 1024)
+    dst = tmp_path / "already_exists.img"
+    dst.write_bytes(b"ORIGINAL_IMPORTANT_DATA")
+
+    with pytest.raises(FileExistsError, match=r"(?i)arquivo de destino já existe"):
+        create_raw_disk_image(str(src), dst, allow_overwrite=False)
+
+    # Conteúdo original permanece intocado
+    assert dst.read_bytes() == b"ORIGINAL_IMPORTANT_DATA"
+
+
+def test_create_raw_disk_image_allows_overwrite_when_flag_is_true(tmp_path):
+    """P1: Permite sobrescrita controlada quando allow_overwrite=True."""
+    src = tmp_path / "src_data_ovw.bin"
+    src.write_bytes(b"\x77" * 2048)
+    dst = tmp_path / "target_ovw.img"
+    dst.write_bytes(b"OLD_CONTENT")
+
+    ok = create_raw_disk_image(str(src), dst, allow_overwrite=True)
+    assert ok is True
+    assert dst.read_bytes() == src.read_bytes()
+
+
+def test_create_raw_disk_image_rejects_unaligned_sector_reads(tmp_path):
+    """P1: Falha e remove arquivo temporário se a leitura for desalinhada em relação ao setor."""
+    src = tmp_path / "unaligned_src.bin"
+    # 700 bytes não é múltiplo de 512
+    src.write_bytes(b"\x33" * 700)
+    dst = tmp_path / "unaligned_out.img"
+
+    ok = create_raw_disk_image(str(src), dst, sector_size=512)
+    assert ok is False
+    assert not dst.exists()
+    # Verifica que não ficou nenhum .tmp no diretório
+    tmps = list(tmp_path.glob("*.tmp"))
+    assert len(tmps) == 0

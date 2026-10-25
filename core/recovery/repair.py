@@ -40,7 +40,7 @@ def repair_gpt_partition_offset(
     backup_dir: Path | None = None,
     sector_size: int = DEFAULT_SECTOR_SIZE
 ) -> RepairResult:
-    """Corrige o offset de início e fim de uma partição na tabela GPT com backup prévio de segurança."""
+    """Corrige o offset de início e fim de uma partição na tabela GPT com snapshot completo (primário e backup) e rollback verificado."""
     backup_dir = backup_dir or Path("backups")
 
     # Proteção P0: Validar segurança antes de criar qualquer diretório ou arquivo
@@ -55,18 +55,15 @@ def repair_gpt_partition_offset(
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     clean_name = device_path.replace("\\", "_").replace("/", "_").replace(":", "").replace(".", "").strip("_")[-30:]
-    backup_path = backup_dir / f"backup_gpt_{clean_name}_{timestamp}.bin"
-
-    # 1. Snapshot de segurança (LBA 0 a 33)
-    if not create_lba_snapshot(device_path, backup_path, sector_count=34, sector_size=sector_size):
-        return RepairResult(success=False, message="Falha ao criar snapshot de segurança antes do reparo.")
+    primary_backup_path = backup_dir / f"backup_gpt_primary_{clean_name}_{timestamp}.bin"
+    secondary_backup_path = backup_dir / f"backup_gpt_secondary_{clean_name}_{timestamp}.bin"
 
     try:
-        # 2. Ler tabela GPT atual
         with open(device_path, "r+b") as f:
+            # 1. Ler tabela GPT atual
             gpt = parse_gpt(f, sector_size=sector_size)
             if not gpt:
-                return RepairResult(success=False, message="Não foi possível ler a tabela GPT atual.", backup_file=backup_path)
+                return RepairResult(success=False, message="Não foi possível ler a tabela GPT atual.")
 
             # Localiza a partição alvo
             part_to_update = None
@@ -78,8 +75,7 @@ def repair_gpt_partition_offset(
             if not part_to_update:
                 return RepairResult(
                     success=False,
-                    message=f"Partição de índice {target_partition_index} não encontrada na tabela GPT.",
-                    backup_file=backup_path
+                    message=f"Partição de índice {target_partition_index} não encontrada na tabela GPT."
                 )
 
             old_start = part_to_update.first_lba
@@ -90,8 +86,7 @@ def repair_gpt_partition_offset(
             if new_start < gpt.first_usable_lba or new_end > gpt.last_usable_lba or new_start > new_end:
                 return RepairResult(
                     success=False,
-                    message=f"Limites inválidos: LBA {new_start}..{new_end} ultrapassa área utilizável ({gpt.first_usable_lba}..{gpt.last_usable_lba}).",
-                    backup_file=backup_path
+                    message=f"Limites inválidos: LBA {new_start}..{new_end} ultrapassa área utilizável ({gpt.first_usable_lba}..{gpt.last_usable_lba})."
                 )
 
             # Valida sobreposição com outras partições ativas
@@ -100,71 +95,140 @@ def repair_gpt_partition_offset(
                     if max(new_start, p.first_lba) <= min(new_end, p.last_lba):
                         return RepairResult(
                             success=False,
-                            message=f"Conflito de partição: o novo intervalo LBA {new_start}..{new_end} sobrepõe a partição {p.index} (LBA {p.first_lba}..{p.last_lba}).",
-                            backup_file=backup_path
+                            message=f"Conflito de partição: o novo intervalo LBA {new_start}..{new_end} sobrepõe a partição {p.index} (LBA {p.first_lba}..{p.last_lba})."
                         )
+
+            # 2. Identificar e capturar snapshot completo de todas as regiões a serem modificadas
+            entries_bytes_len = gpt.num_partition_entries * gpt.partition_entry_size
+            entries_sectors = (entries_bytes_len + sector_size - 1) // sector_size
+            primary_total_sectors = gpt.partition_entries_lba + entries_sectors
+
+            from core.partition.gpt import rebuild_backup_gpt
+            bkp_header_bytes, bkp_entries_bytes, bkp_entries_lba = rebuild_backup_gpt(gpt, gpt.partitions, sector_size=sector_size)
+
+            # Snapshot primário (LBA 0 até fim das entradas primárias)
+            f.seek(0)
+            orig_primary_bytes = f.read(primary_total_sectors * sector_size)
+            if len(orig_primary_bytes) != primary_total_sectors * sector_size:
+                return RepairResult(success=False, message="Leitura incompleta da região GPT primária para snapshot.")
+            primary_backup_path.write_bytes(orig_primary_bytes)
+
+            # Snapshot secundário (LBA de entradas de backup até cabeçalho de backup)
+            orig_backup_bytes = b""
+            backup_total_sectors = 0
+            if gpt.backup_lba > 0 and bkp_entries_lba > 0:
+                backup_total_sectors = (gpt.backup_lba - bkp_entries_lba) + 1
+                f.seek(bkp_entries_lba * sector_size)
+                orig_backup_bytes = f.read(backup_total_sectors * sector_size)
+                if len(orig_backup_bytes) != backup_total_sectors * sector_size:
+                    return RepairResult(success=False, message="Leitura incompleta da região GPT de backup para snapshot.")
+                secondary_backup_path.write_bytes(orig_backup_bytes)
+
+            # Verificação pós-criação dos snapshots antes de qualquer escrita
+            if primary_backup_path.read_bytes() != orig_primary_bytes:
+                return RepairResult(success=False, message="Verificação de integridade do snapshot primário falhou.")
+            if orig_backup_bytes and secondary_backup_path.read_bytes() != orig_backup_bytes:
+                return RepairResult(success=False, message="Verificação de integridade do snapshot de backup falhou.")
 
             log.info("Ajustando partição %d: LBA %d -> LBA %d..%d", target_partition_index, old_start, new_start, new_end)
 
-            # Atualiza o objeto da partição preservando flags existentes (remove apenas flag de ocultação se presente)
+            # Atualiza o objeto da partição
             part_to_update.first_lba = new_start
             part_to_update.last_lba = new_end
             part_to_update.flags = part_to_update.flags & ~0x8000000000000000
 
-            # 3. Recalcular cabeçalho primário, entradas e cabeçalho de backup (LBA final)
+            # 3. Recalcular estruturas primária e de backup
             new_header_bytes, new_entries_bytes = rebuild_gpt(gpt, gpt.partitions, sector_size=sector_size)
-            from core.partition.gpt import rebuild_backup_gpt
             bkp_header_bytes, bkp_entries_bytes, bkp_entries_lba = rebuild_backup_gpt(gpt, gpt.partitions, sector_size=sector_size)
 
+            def do_rollback():
+                log.warning("Iniciando rollback seguro a partir dos snapshots...")
+                try:
+                    f.seek(0)
+                    f.write(orig_primary_bytes)
+                    if orig_backup_bytes and bkp_entries_lba > 0:
+                        f.seek(bkp_entries_lba * sector_size)
+                        f.write(orig_backup_bytes)
+                    f.flush()
+                    os.fsync(f.fileno())
+                    f.seek(0)
+                    rb_prim = f.read(len(orig_primary_bytes))
+                    rb_bkp = b""
+                    if orig_backup_bytes:
+                        f.seek(bkp_entries_lba * sector_size)
+                        rb_bkp = f.read(len(orig_backup_bytes))
+                    return (rb_prim == orig_primary_bytes) and (not orig_backup_bytes or rb_bkp == orig_backup_bytes)
+                except Exception as rb_exc:
+                    log.error("Exceção durante rollback: %s", rb_exc)
+                    return False
+
             # 4. Gravação nos LBAs primários (LBA 1 e LBA 2..33)
-            f.seek(1 * sector_size)
-            f.write(new_header_bytes)
-
-            f.seek(gpt.partition_entries_lba * sector_size)
-            f.write(new_entries_bytes)
-
-            # 5. Gravação da cópia de backup no fim do disco
-            if gpt.backup_lba > 0 and bkp_entries_lba > 0:
-                f.seek(bkp_entries_lba * sector_size)
-                f.write(bkp_entries_bytes)
-                f.seek(gpt.backup_lba * sector_size)
-                f.write(bkp_header_bytes)
-
-            f.flush()
             try:
+                f.seek(1 * sector_size)
+                f.write(new_header_bytes)
+
+                f.seek(gpt.partition_entries_lba * sector_size)
+                f.write(new_entries_bytes)
+
+                # 5. Gravação da cópia de backup no fim do disco
+                if gpt.backup_lba > 0 and bkp_entries_lba > 0:
+                    f.seek(bkp_entries_lba * sector_size)
+                    f.write(bkp_entries_bytes)
+                    f.seek(gpt.backup_lba * sector_size)
+                    f.write(bkp_header_bytes)
+
+                f.flush()
                 os.fsync(f.fileno())
-            except OSError as err:
-                log.error("Falha ao forçar sincronização física (fsync): %s", err)
-                raise OSError(f"Falha de sincronização física: {err}") from err
 
-            # Verificação pós-escrita imediata no cabeçalho primário
-            f.seek(1 * sector_size)
-            read_hdr = f.read(len(new_header_bytes))
-            if read_hdr != new_header_bytes:
-                raise OSError("Verificação pós-escrita falhou no cabeçalho GPT primário.")
+                # Verificação pós-escrita imediata no cabeçalho e entradas primárias
+                f.seek(1 * sector_size)
+                read_hdr = f.read(len(new_header_bytes))
+                if read_hdr != new_header_bytes:
+                    raise OSError("Verificação pós-escrita falhou no cabeçalho GPT primário.")
 
-            # Verificação pós-escrita imediata no cabeçalho e entradas de backup
-            if gpt.backup_lba > 0 and bkp_entries_lba > 0:
-                f.seek(bkp_entries_lba * sector_size)
-                read_bkp_entries = f.read(len(bkp_entries_bytes))
-                if read_bkp_entries != bkp_entries_bytes:
-                    raise OSError("Verificação pós-escrita falhou nas entradas GPT de backup.")
+                f.seek(gpt.partition_entries_lba * sector_size)
+                read_entries = f.read(len(new_entries_bytes))
+                if read_entries != new_entries_bytes:
+                    raise OSError("Verificação pós-escrita falhou nas entradas GPT primárias.")
 
-                f.seek(gpt.backup_lba * sector_size)
-                read_bkp_hdr = f.read(len(bkp_header_bytes))
-                if read_bkp_hdr != bkp_header_bytes:
-                    raise OSError("Verificação pós-escrita falhou no cabeçalho GPT de backup.")
+                # Verificação pós-escrita imediata no cabeçalho e entradas de backup
+                if gpt.backup_lba > 0 and bkp_entries_lba > 0:
+                    f.seek(bkp_entries_lba * sector_size)
+                    read_bkp_entries = f.read(len(bkp_entries_bytes))
+                    if read_bkp_entries != bkp_entries_bytes:
+                        raise OSError("Verificação pós-escrita falhou nas entradas GPT de backup.")
 
-        log.info("Tabela GPT primária corrigida e gravada com sucesso.")
+                    f.seek(gpt.backup_lba * sector_size)
+                    read_bkp_hdr = f.read(len(bkp_header_bytes))
+                    if read_bkp_hdr != bkp_header_bytes:
+                        raise OSError("Verificação pós-escrita falhou no cabeçalho GPT de backup.")
 
-        # 5. Notificar o sistema operacional para atualizar o cache de disco
+            except Exception as write_err:
+                log.error("Erro na gravação ou verificação GPT: %s", write_err)
+                rb_ok = do_rollback()
+                if rb_ok:
+                    return RepairResult(
+                        success=False,
+                        message=f"Falha na gravação/verificação ({write_err}). Rollback executado com sucesso e verificado.",
+                        backup_file=primary_backup_path
+                    )
+                else:
+                    return RepairResult(
+                        success=False,
+                        message=f"FALHA CRÍTICA: Gravação falhou ({write_err}) e rollback falhou na verificação. Restaure manualmente a partir de {primary_backup_path}.",
+                        backup_file=primary_backup_path
+                    )
+
+        log.info("Tabela GPT primária e de backup corrigidas e verificadas com sucesso.")
+
+        # 6. Notificar o sistema operacional para atualizar o cache de disco
         if os.name == "nt":
             subprocess.run(["powershell", "-NoProfile", "-Command", "Update-HostStorageCache"], capture_output=True, timeout=10)
 
         return RepairResult(
             success=True,
             message=f"Partição {target_partition_index} realinhada com sucesso para LBA {new_start:,}..{new_end:,} ({discovered_fs.size_gb:.1f} GB).",
-            backup_file=backup_path,
+            backup_file=primary_backup_path,
             old_start_lba=old_start,
             new_start_lba=new_start,
             new_end_lba=new_end,
@@ -174,11 +238,11 @@ def repair_gpt_partition_offset(
         return RepairResult(
             success=False,
             message="Permissão negada ao gravar no disco. Execute o terminal como Administrador/root.",
-            backup_file=backup_path
+            backup_file=primary_backup_path
         )
     except Exception as exc:
         log.error("Exceção ao reparar tabela GPT: %s", exc)
-        return RepairResult(success=False, message=f"Erro durante a gravação: {exc}", backup_file=backup_path)
+        return RepairResult(success=False, message=f"Erro durante a operação: {exc}", backup_file=primary_backup_path)
 
 
 def create_raw_disk_image(
@@ -187,6 +251,7 @@ def create_raw_disk_image(
     sector_size: int = DEFAULT_SECTOR_SIZE,
     max_sectors: int | None = None,
     chunk_sectors: int = 2048,
+    allow_overwrite: bool = False,
     progress_cb=None,
     cancel_check=None
 ) -> bool:
@@ -200,7 +265,7 @@ def create_raw_disk_image(
 
     output_path = Path(output_path)
 
-    # 1. Proteção P0: Validar independência de disco físico ANTES de criar diretório ou abrir arquivo
+    # 1. Proteção P0: Validar independência de disco físico ANTES de criar diretório ou arquivo
     try:
         from core.hardware.device_resolver import assert_safe_source_and_destination
         assert_safe_source_and_destination(device_path, output_path, is_directory=False)
@@ -216,17 +281,38 @@ def create_raw_disk_image(
         if "não pode coincidir" in str(err):
             raise
 
-    # 2. Criação do diretório pai somente após validação segura
+    # 2. Política de não sobrescrever destino existente sem autorização explícita
+    if output_path.exists() and not allow_overwrite:
+        log.warning("Arquivo de destino já existe e allow_overwrite=False: %s", output_path)
+        raise FileExistsError(f"O arquivo de destino já existe ({output_path}). Para substituir, defina allow_overwrite=True.")
+
+    # 3. Criação do diretório pai somente após validação segura
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 4. Arquivo temporário isolado para escrita intermediária atômica
+    temp_output_path = output_path.with_name(f".{output_path.name}.{os.getpid()}_{int(time.time() * 1000)}.tmp")
+    try:
+        assert_safe_source_and_destination(device_path, temp_output_path, is_directory=False)
+    except Exception as exc:
+        log.error("Bloqueio de segurança no arquivo temporário: %s", exc)
+        raise ValueError(f"Destino temporário inseguro: {exc}") from exc
 
     chunk_bytes = chunk_sectors * sector_size
     current_sector = 0
     t_start = time.time()
     last_cb_time = t_start
     bytes_transferred = 0
+    success = False
+
+    def cleanup_temp():
+        try:
+            if temp_output_path.exists():
+                temp_output_path.unlink()
+        except Exception as e:
+            log.warning("Falha ao remover arquivo temporário %s: %s", temp_output_path, e)
 
     try:
-        with open(device_path, "rb") as src, open(output_path, "wb") as dst:
+        with open(device_path, "rb") as src, open(temp_output_path, "wb") as dst:
             while True:
                 if cancel_check and cancel_check():
                     log.info("Cópia de imagem cancelada pelo usuário.")
@@ -248,6 +334,11 @@ def create_raw_disk_image(
                         log.error("Fim prematuro da origem: lidos %d setores de %d esperados.", current_sector, max_sectors)
                         return False
                     break
+
+                # Verificação estrita de alinhamento de setor na leitura parcial
+                if len(buf) % sector_size != 0:
+                    log.error("Leitura parcial desalinhada: lidos %d bytes (não múltiplo de %d).", len(buf), sector_size)
+                    return False
 
                 dst.write(buf)
                 sectors_read = len(buf) // sector_size
@@ -272,12 +363,19 @@ def create_raw_disk_image(
             log.error("Cópia incompleta: apenas %d setores transferidos de %d.", current_sector, max_sectors)
             return False
 
+        # Substituição atômica somente após fsync comprovado e validação total
+        os.replace(temp_output_path, output_path)
+        success = True
+
         if progress_cb:
             now = time.time()
             speed = (bytes_transferred / (1024 * 1024)) / max(0.1, now - t_start)
-            progress_cb(current_sector, current_sector, speed)
+            progress_cb(current_sector, max_sectors or current_sector, speed)
         return True
     except Exception as exc:
         log.error("Erro ao criar imagem forense: %s", exc)
         return False
+    finally:
+        if not success:
+            cleanup_temp()
 

@@ -167,3 +167,142 @@ def test_gui_render_surface_scan_block(mock_gui):
     app._draw_surface_block(res, summary)
     assert "< 20ms: 1" in app.leg_fast.cget("text")
     assert app.block_canvas_idx == 1
+
+
+def test_gui_render_scan_results_enables_boot_repair_when_corrupted_vbr_detected(mock_gui):
+    """Item 4: Valida que a detecção de VBR NTFS corrompido habilita o botão de restauração."""
+    from core.filesystem.ntfs_boot_repair import BootSectorDiagnostic
+
+    app, root = mock_gui
+    fake_disk = app.disks[0] if app.disks else None
+    if not fake_disk:
+        pytest.skip("Discos não carregados no mock")
+
+    # Cenário 1: Boot primário corrompido, mas backup íntegro (can_repair=True)
+    diag_repairable = BootSectorDiagnostic(
+        primary_valid=False,
+        backup_valid=True,
+        can_repair=True,
+        primary_lba=2048,
+        backup_lba=10247
+    )
+    app._render_scan_results(None, None, [], fake_disk, ntfs_boot_diag=diag_repairable, ntfs_target_partition=(2048, 8200))
+    assert str(app.btn_repair_boot.cget("state")) == "normal"
+    assert "VBR CORROMPIDO" in app.lbl_repair_diagnosis.cget("text")
+
+    # Cenário 2: Geometria consistente, sem corrupção (can_repair=False)
+    diag_healthy = BootSectorDiagnostic(
+        primary_valid=True,
+        backup_valid=True,
+        can_repair=False,
+        primary_lba=2048,
+        backup_lba=10247
+    )
+    app._render_scan_results(None, None, [], fake_disk, ntfs_boot_diag=diag_healthy, ntfs_target_partition=(2048, 8200))
+    assert str(app.btn_repair_boot.cget("state")) == "disabled"
+
+
+def test_gui_render_smart_metrics_usb_vs_internal_badge(mock_gui):
+    """Item 7: Valida texto diferenciado de badge para USB vs conexão interna sem telemetria."""
+    app, root = mock_gui
+
+    # Relatório Unknown
+    rep = SmartReport(
+        device_id="0",
+        device_path=r"\\.\PhysicalDrive0",
+        model="Test Drive",
+        serial=None,
+        risk_level=SmartRiskLevel.UNKNOWN,
+        temperature_c=None,
+        reallocated_sectors=None,
+        pending_sectors=None,
+        uncorrectable_sectors=None,
+        crc_errors=None,
+        spin_retries=None,
+        power_on_hours=None,
+        attributes=[],
+        windows_reliability={},
+        summary_messages=[],
+        action_recommendation="Conecte em porta nativa",
+        evidencia_observada=[],
+        hipotese_provavel="",
+        limitacoes="",
+        acao_sugerida=""
+    )
+
+    # Disco USB
+    usb_disk = DiskInfo(
+        number=2,
+        device_path=r"\\.\PhysicalDrive2",
+        friendly_name="USB Flash Drive",
+        serial_number=None,
+        size_bytes=16_000_000_000,
+        bus_type="USB",
+        partition_style="MBR",
+        media_type="Removable",
+        health_status="Unknown",
+        operational_status="OK",
+        temperature=None,
+        read_errors=0,
+        write_errors=0,
+        wear=None,
+        is_read_only=False,
+        is_boot=False,
+        is_system=False,
+        can_open_raw=True
+    )
+    app._render_smart_results(rep, disk=usb_disk)
+    assert "Interface USB" in app.dash_health_badge.cget("text")
+
+    # Disco SATA interno
+    sata_disk = DiskInfo(
+        number=3,
+        device_path=r"\\.\PhysicalDrive3",
+        friendly_name="SATA Internal HDD",
+        serial_number=None,
+        size_bytes=500_000_000_000,
+        bus_type="SATA",
+        partition_style="GPT",
+        media_type="HDD",
+        health_status="Unknown",
+        operational_status="OK",
+        temperature=None,
+        read_errors=0,
+        write_errors=0,
+        wear=None,
+        is_read_only=False,
+        is_boot=False,
+        is_system=False,
+        can_open_raw=True
+    )
+    app._render_smart_results(rep, disk=sata_disk)
+    assert "S.M.A.R.T. Não Disponível / Indeterminada" in app.dash_health_badge.cget("text")
+
+
+def test_gui_queue_poller_thread_safe_message_handlers(mock_gui):
+    """Item 6: Valida que mensagens da fila restabelecem estados dos botões sem chamadas de thread secundária."""
+    app, root = mock_gui
+
+    # 1. Clone ended restabelece botão de clone
+    app.btn_start_clone.config(state=tk.DISABLED)
+    app.btn_cancel_clone.config(state=tk.NORMAL)
+    app.msg_queue.put(("clone_ended", None))
+
+    # 2. Carver ended restabelece botão de carver
+    app.btn_start_carve.config(state=tk.DISABLED)
+    app.msg_queue.put(("carver_ended", None))
+
+    # 3. Surface ended restabelece botões de teste de superfície
+    app.btn_start_surface.config(state=tk.DISABLED)
+    app.btn_cancel_surface.config(state=tk.NORMAL)
+    app.msg_queue.put(("surface_ended", None))
+
+    # Processa mensagens enfileiradas através do poller da fila
+    app._start_queue_poller()
+    root.update()
+
+    assert str(app.btn_start_clone.cget("state")) == "normal"
+    assert str(app.btn_cancel_clone.cget("state")) == "disabled"
+    assert str(app.btn_start_carve.cget("state")) == "normal"
+    assert str(app.btn_start_surface.cget("state")) == "normal"
+    assert str(app.btn_cancel_surface.cget("state")) == "disabled"

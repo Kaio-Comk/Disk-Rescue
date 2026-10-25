@@ -222,3 +222,38 @@ def test_repair_gpt_validates_backup_dir_before_mkdir(tmp_path, monkeypatch):
     assert not unsafe_dir.exists()
 
 
+def test_repair_gpt_creates_both_primary_and_backup_snapshots(tmp_path):
+    """P0 Teste: Garante que snapshots preventivos tanto da GPT Primária quanto da de Backup sejam gravados."""
+    from core.filesystem.scanner import DiscoveredFilesystem
+    from core.recovery.repair import repair_gpt_partition_offset
+
+    total_sectors = 100_000
+    disk_bytes = bytearray(64 * 512)
+    base_gpt = _criar_gpt_sintetico()
+    disk_bytes[:len(base_gpt)] = base_gpt
+    disk_bytes.extend(b"\x00" * ((total_sectors - 64) * 512))
+
+    struct.pack_into("<Q", disk_bytes, 512 + 32, 99999)  # backup_lba = 99999
+    struct.pack_into("<Q", disk_bytes, 512 + 48, 90000)  # last_usable = 90000
+    disk_bytes[512 + 16 : 512 + 20] = b"\x00\x00\x00\x00"
+    h_crc = zlib.crc32(disk_bytes[512 : 512 + 92]) & 0xFFFFFFFF
+    struct.pack_into("<I", disk_bytes, 512 + 16, h_crc)
+
+    img = tmp_path / "dual_snap_disk.bin"
+    img.write_bytes(disk_bytes)
+    backup_dir = tmp_path / "dual_snapshots"
+
+    fs_valid = DiscoveredFilesystem("NTFS", start_lba=40000, total_sectors=10001, size_bytes=10001 * 512)
+    res = repair_gpt_partition_offset(str(img), target_partition_index=2, discovered_fs=fs_valid, backup_dir=backup_dir)
+    assert res.success is True
+
+    # Valida existência física e integridade de ambos os snapshots
+    primary_snaps = list(backup_dir.glob("backup_gpt_primary_*.bin"))
+    backup_snaps = list(backup_dir.glob("backup_gpt_secondary_*.bin"))
+
+    assert len(primary_snaps) >= 1
+    assert len(backup_snaps) >= 1
+    assert primary_snaps[0].stat().st_size == 34 * 512
+    assert backup_snaps[0].stat().st_size == 33 * 512
+
+

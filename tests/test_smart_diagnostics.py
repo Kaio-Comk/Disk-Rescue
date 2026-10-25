@@ -138,3 +138,46 @@ def test_smart_unknown_when_only_uninformative_attributes_present():
     assert report.risk_level == SmartRiskLevel.UNKNOWN
     assert any("nenhum atributo crítico" in e.lower() for e in report.evidencia_observada)
 
+
+def test_smart_missing_critical_5_or_197_prevents_green():
+    """P2 Teste: Garante que a ausência de ID 5 ou ID 197 impeça GREEN mesmo com todos os outros zerados."""
+    report = analyze_smart_data(
+        device_id=8,
+        device_path=r"\\.\PhysicalDrive8",
+        model="SSD Incompleto",
+        serial="INC001",
+        raw_attributes={1: 0, 198: 0, 199: 0},  # Faltam ID 5 e ID 197
+        temperature_c=28
+    )
+    assert report.risk_level == SmartRiskLevel.UNKNOWN
+    assert any("nenhum atributo crítico" in e.lower() for e in report.evidencia_observada)
+
+
+def test_smart_usb_vs_non_usb_unknown_differentiation():
+    """P2 Teste: Diferenciação honesta entre limitação de ponte USB e ausência de telemetria geral."""
+    # Cenário USB
+    rep_usb = analyze_smart_data(
+        device_id=9,
+        device_path=r"\\.\PhysicalDrive9",
+        model="USB Adapter Disk",
+        serial="USB123",
+        raw_attributes={},
+        is_usb=True
+    )
+    assert rep_usb.risk_level == SmartRiskLevel.UNKNOWN
+    assert "usb" in rep_usb.action_recommendation.lower()
+    assert any("usb" in h.lower() for h in rep_usb.hipotese_provavel)
+
+    # Cenário NÃO-USB (ex: SATA interno ou NVMe sem telemetria ATA direta)
+    rep_sata = analyze_smart_data(
+        device_id=10,
+        device_path=r"\\.\PhysicalDrive10",
+        model="Internal HDD",
+        serial="INT456",
+        raw_attributes={},
+        is_usb=False
+    )
+    assert rep_sata.risk_level == SmartRiskLevel.UNKNOWN
+    assert "controladora de disco" in rep_sata.action_recommendation.lower()
+    assert "usb" not in rep_sata.action_recommendation.lower()
+

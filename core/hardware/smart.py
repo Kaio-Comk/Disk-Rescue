@@ -80,12 +80,14 @@ def analyze_smart_data(
     raw_attributes: Dict[int, int],
     temperature_c: Optional[int] = None,
     normalized_attributes: Optional[Dict[int, tuple[int, int, int]]] = None,
-    windows_reliability: Optional[Dict[str, int]] = None
+    windows_reliability: Optional[Dict[str, int]] = None,
+    is_usb: bool = False
 ) -> SmartReport:
     """
     Interpreta valores brutos SMART e gera diagnóstico técnico com regras forenses.
     Não preenche valores normalizados fictícios (current/worst/threshold) a menos que
     fornecidos explicitamente pelo hardware.
+    Nunca declara estado Verde sem monitoramento de setores remapeados (05) e pendentes (C5).
     """
     # Se não houver atributos SMART de hardware disponíveis, não declarar verde falsamente
     if not raw_attributes:
@@ -97,10 +99,34 @@ def analyze_smart_data(
                 f"WriteErrors={windows_reliability.get('WriteErrorsTotal', 0)}, "
                 f"Wear={windows_reliability.get('Wear', 0)}"
             )
-        limitacoes = [
-            "A telemetria S.M.A.R.T. do fabricante não pôde ser consultada diretamente (ex: adaptador USB sem ATA pass-through).",
-            "Métricas do SO refletem apenas retentativas no nível de software e não substituem o diagnóstico de hardware."
-        ]
+
+        if is_usb:
+            limitacoes = [
+                "A telemetria S.M.A.R.T. do fabricante não pôde ser consultada diretamente através do barramento USB (sem ATA pass-through).",
+                "Métricas do SO refletem apenas retentativas no nível de software e não substituem o diagnóstico de hardware."
+            ]
+            hipoteses = ["Dispositivo conectado via interface USB que não repassa comandos ATA brutos (sem pass-through)."]
+            summary = ["Telemetria S.M.A.R.T. indisponível através da interface USB."]
+        else:
+            limitacoes = [
+                "A telemetria S.M.A.R.T. do fabricante não foi exposta pelo driver ou controladora de armazenamento.",
+                "Métricas do SO refletem apenas retentativas no nível de software e não substituem o diagnóstico de hardware."
+            ]
+            hipoteses = ["Controladora de disco ou driver não expôs registros ATA S.M.A.R.T. diretos para consulta."]
+            summary = ["Telemetria S.M.A.R.T. indisponível ou insuficiente para este dispositivo."]
+
+        if is_usb:
+            rec_text = (
+                "Telemetria S.M.A.R.T. indisponível através da interface USB. "
+                "Conecte o disco diretamente a uma porta SATA nativa para telemetria de hardware "
+                "ou realize clonagem preventiva setor a setor."
+            )
+        else:
+            rec_text = (
+                "O hardware ou driver da controladora de disco não retornou registros S.M.A.R.T. válidos. "
+                "Em caso de suspeita de instabilidade física, realize clonagem preventiva setor a setor."
+            )
+
         return SmartReport(
             device_id=device_id,
             device_path=device_path,
@@ -116,15 +142,12 @@ def analyze_smart_data(
             power_on_hours=None,
             attributes={},
             windows_reliability=windows_reliability,
-            summary_messages=["Telemetria S.M.A.R.T. do fabricante não disponível ou insuficiente para este dispositivo."],
-            action_recommendation=(
-                "O hardware ou driver não retornou registros S.M.A.R.T. válidos. "
-                "Em caso de suspeita de instabilidade física, realize clonagem preventiva setor a setor."
-            ),
+            summary_messages=summary,
+            action_recommendation=rec_text,
             evidencia_observada=evidencias,
-            hipotese_provavel=["Dispositivo USB sem ATA pass-through, unidade virtual/simulada ou firmware com telemetria restrita."],
+            hipotese_provavel=hipoteses,
             limitacoes=limitacoes,
-            acao_sugerida="Proceder com clonagem resiliente para resguardar os dados caso haja lentidão ou sintomas de falha."
+            acao_sugerida=rec_text
         )
 
     reallocated = raw_attributes.get(5, None)
@@ -158,52 +181,24 @@ def analyze_smart_data(
         "A ausência de erros registrados não comprova que a mídia magnética ou células flash estejam 100% íntegras."
     ]
 
-    # Regra 0: Validação de presença de indicadores mínimos para classificação Verde
-    CRITICAL_HEALTH_IDS = {1, 5, 10, 187, 188, 196, 197, 198, 199}
-    has_critical_indicators = any(aid in raw_attributes for aid in CRITICAL_HEALTH_IDS)
-
     messages = []
-    if not has_critical_indicators:
-        risk = SmartRiskLevel.UNKNOWN
-        evidencias.append("Nenhum atributo crítico de saúde física (IDs 5, 197, 198, 199, etc.) está presente na telemetria obtida.")
-        hipoteses.append("O dispositivo ou a interface de comunicação não expôs atributos fundamentais de integridade mecânica.")
-        limitacoes.append("A ausência de contadores críticos impede atestar se a superfície ou controladora estão sadias.")
-        recommendation = "Estado de integridade indeterminado. Execute varredura de superfície para avaliar a resposta dos blocos."
-    else:
-        risk = SmartRiskLevel.GREEN
-        recommendation = (
-            "O disco apresenta parâmetros monitorados saudáveis e estáveis. "
-            "Recomenda-se realizar snapshot de segurança antes de qualquer intervenção estrutural ou particionamento."
-        )
-
-    # Regra 1: Mau contato de Cabo SATA / USB
     crc_val = crc_err or 0
     realloc_val = reallocated or 0
     pend_val = pending or 0
     uncorr_val = uncorrectable or 0
     spin_val = spin_retry or 0
 
-    if crc_val > 0 and realloc_val == 0 and pend_val == 0 and uncorr_val == 0:
-        risk = SmartRiskLevel.YELLOW
-        evidencias.append(f"Contador UltraDMA CRC (ID 199/0xC7): {crc_val} erros registrados na interface.")
-        evidencias.append("Zero setores pendentes (C5), realocados (05) ou offline uncorrectable (C6) observados.")
-        hipoteses.append(
-            "Indício de degradação na comunicação física (cabo de dados SATA, conector oxidado ou porta na placa-mãe). "
-            "A mídia física não apresenta setores defeituosos registrados até o momento."
-        )
-        limitacoes.append(
-            "Erros de CRC são um indicativo de problema de transmissão, mas não excluem a possibilidade de "
-            "danos não detectados na controladora do próprio disco."
-        )
-        msg_cabo = (
-            f"🔍 INDÍCIO DE PROBLEMA DE CABO/INTERFACE: Detectados {crc_val} erros de CRC UltraDMA (ID 199/C7). "
-            "Não foram observados setores pendentes ou realocados até o momento. Alta probabilidade de falha "
-            "elétrica no cabo de dados SATA ou mau contato na porta. Recomenda-se substituir o cabo SATA e monitorar a integridade."
-        )
-        messages.append(msg_cabo)
-        recommendation = (
-            "Substitua o cabo SATA ou conecte em outra porta da placa-mãe. "
-            "Gere uma imagem forense antes de submeter o disco a esforços intensos e execute teste de superfície."
+    is_red = False
+    is_yellow = False
+
+    # Regra 3: Fadiga Mecânica no Motor
+    if spin_val > 0:
+        is_red = True
+        evidencias.append(f"Tentativas de rotação do motor (ID 10): {spin_val} eventos registrados.")
+        hipoteses.append("Fadiga mecânica no rolamento do motor de rotação ou fornecimento elétrico instável.")
+        messages.append(
+            f"⚙️ FADIGA MECÂNICA: {spin_val} falhas de inicialização do motor (ID 10/0A). "
+            "O motor de rotação ou o rolamento está tendo dificuldade para atingir a rotação nominal."
         )
 
     # Regra 2: Degradação de Superfície / Bad Sectors
@@ -213,40 +208,73 @@ def analyze_smart_data(
             f"Irrecuperáveis (198): {uncorr_val}"
         )
         if pend_val > 20 or realloc_val > 100 or uncorr_val > 0:
-            risk = SmartRiskLevel.RED
+            is_red = True
             hipoteses.append("Degradação física severa da superfície magnética ou esgotamento de blocos de reserva.")
             messages.append(
                 f"🚨 FALHA CRÍTICA DE MÍDIA: {pend_val} setores pendentes (C5), {realloc_val} setores remapeados (05) "
                 f"e {uncorr_val} irrecuperáveis (C6). A superfície magnética está degradando rapidamente."
             )
-            recommendation = (
-                "RISCO IMINENTE: Crie imediatamente uma Imagem Forense (.img) via Clonagem Resiliente. "
-                "NÃO execute chkdsk, desfragmentação ou formatação."
-            )
         else:
-            risk = SmartRiskLevel.YELLOW
-            hipoteses.append("Presença de setores instáveis sendo monitorados ou remapeados pelo firmware.")
+            is_yellow = True
+            hipoteses.append("Presença de setores defeituosos ou instáveis em processo de realocação pelo firmware.")
             messages.append(
                 f"⚠️ ATENÇÃO: Detectados {pend_val} setores pendentes e {realloc_val} setores remapeados. "
                 "Existem bad sectors sendo monitorados pelo firmware."
             )
-            recommendation = "Faça backup dos arquivos prioritários ou gere uma imagem clone antes de reparos."
 
-    # Regra 3: Fadiga Mecânica no Motor
-    if spin_val > 0:
-        risk = SmartRiskLevel.RED
-        evidencias.append(f"Tentativas de rotação do motor (ID 10): {spin_val} eventos registrados.")
-        hipoteses.append("Fadiga mecânica no rolamento do motor de rotação ou fornecimento elétrico instável.")
-        messages.append(
-            f"⚙️ FADIGA MECÂNICA: {spin_val} falhas de inicialização do motor (ID 10/0A). "
-            "O motor de rotação ou o rolamento está tendo dificuldade para atingir a rotação nominal."
+    # Regra 1: Mau contato de Cabo SATA / USB
+    if crc_val > 0 and realloc_val == 0 and pend_val == 0 and uncorr_val == 0:
+        is_yellow = True
+        evidencias.append(f"Contador UltraDMA CRC (ID 199/0xC7): {crc_val} erros registrados na interface.")
+        evidencias.append("Zero setores pendentes (C5), realocados (05) ou offline uncorrectable (C6) observados.")
+        hipoteses.append(
+            "Indício de degradação na comunicação física (cabo de dados SATA, conector oxidado ou porta na placa-mãe). "
+            "A mídia física não apresenta setores defeituosos registrados até o momento."
         )
-        recommendation = "Evite desligar e ligar o disco frequentemente. Faça cópia de emergência ininterrupta."
+        messages.append(
+            f"🔍 INDÍCIO DE PROBLEMA DE CABO/INTERFACE: Detectados {crc_val} erros de CRC UltraDMA (ID 199/C7). "
+            "Não foram observados setores pendentes ou realocados até o momento. Alta probabilidade de falha "
+            "elétrica no cabo de dados SATA ou mau contato na porta. Recomenda-se substituir o cabo SATA e monitorar a integridade."
+        )
 
-    if not messages:
-        evidencias.append("Nenhum erro de leitura bruta, remapeamento ou CRC registrado nos atributos consultados.")
+    # Determinação rigorosa do nível de risco:
+    # Para ser VERDE, a telemetria DEVE ter monitorado e confirmado ausência de defeito
+    # tanto em setores remapeados (ID 5) quanto em setores pendentes (ID 197).
+    has_sufficient_health_evidence = (
+        (5 in raw_attributes and raw_attributes[5] == 0) and
+        (197 in raw_attributes and raw_attributes[197] == 0)
+    )
+
+    if is_red:
+        risk = SmartRiskLevel.RED
+        recommendation = "RISCO IMINENTE: Crie imediatamente uma Imagem Forense (.img) via Clonagem Resiliente. NÃO execute chkdsk, desfragmentação ou formatação."
+    elif is_yellow:
+        risk = SmartRiskLevel.YELLOW
+        if crc_val > 0 and realloc_val == 0 and pend_val == 0 and uncorr_val == 0:
+            recommendation = (
+                "Substitua o cabo SATA ou conecte em outra porta da placa-mãe. "
+                "Gere uma imagem forense antes de submeter o disco a esforços intensos e execute teste de superfície."
+            )
+        else:
+            recommendation = "Faça backup dos arquivos prioritários ou gere uma imagem clone antes de reparos."
+    elif has_sufficient_health_evidence:
+        risk = SmartRiskLevel.GREEN
+        evidencias.append("Setores remapeados (ID 5) = 0 e setores pendentes (ID 197) = 0 confirmados.")
+        evidencias.append("Zero erros de leitura bruta, remapeamento ou CRC nos atributos consultados.")
         hipoteses.append("Mídia operando dentro dos parâmetros nominais para os atributos monitorados.")
         messages.append("Nenhum erro de leitura, remapeamento ou comunicação física detectado.")
+        recommendation = (
+            "O disco apresenta parâmetros monitorados saudáveis e estáveis. "
+            "Recomenda-se realizar snapshot de segurança antes de qualquer intervenção estrutural ou particionamento."
+        )
+    else:
+        # Atributos insuficientes para comprovar saúde física (ex: apenas IDs desconhecidos, apenas horas de uso ou apenas ID 1)
+        risk = SmartRiskLevel.UNKNOWN
+        evidencias.append("Nenhum atributo crítico de saúde física verificado: telemetria não contém simultaneamente os contadores essenciais de superfície (IDs 5 e 197).")
+        hipoteses.append("Dados S.M.A.R.T. insuficientes para comprovar a ausência de setores defeituosos.")
+        limitacoes.append("A ausência de contadores críticos de superfície impede atestar se a mídia está sadia.")
+        messages.append("Dados S.M.A.R.T. insuficientes para determinar o estado de saúde do disco.")
+        recommendation = "Estado de integridade indeterminado. Execute varredura de superfície para avaliar a resposta dos blocos."
 
     return SmartReport(
         device_id=device_id,
@@ -271,7 +299,14 @@ def analyze_smart_data(
     )
 
 
-def query_smart_report_windows(device_number: int, device_path: str, model: str, serial: str) -> SmartReport:
+def query_smart_report_windows(
+    device_number: int,
+    device_path: str,
+    model: str,
+    serial: str,
+    bus_type: Optional[str] = None,
+    is_usb: bool = False
+) -> SmartReport:
     """Obtém os contadores de confiabilidade do Windows sem confundir métricas de SO com registros SMART de hardware."""
     script = f"""
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -311,6 +346,8 @@ def query_smart_report_windows(device_number: int, device_path: str, model: str,
     except Exception as exc:
         log.debug("Falha na consulta de StorageReliabilityCounter: %s", exc)
 
+    is_usb_resolved = is_usb or bool(bus_type and "USB" in bus_type.upper())
+
     return analyze_smart_data(
         device_id=device_number,
         device_path=device_path,
@@ -318,5 +355,6 @@ def query_smart_report_windows(device_number: int, device_path: str, model: str,
         serial=serial,
         raw_attributes={},  # Sem atributos SMART de hardware falsamente mapeados
         temperature_c=temperature,
-        windows_reliability=win_reliability if win_reliability else None
+        windows_reliability=win_reliability if win_reliability else None,
+        is_usb=is_usb_resolved
     )

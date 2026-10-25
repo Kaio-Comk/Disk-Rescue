@@ -1,5 +1,5 @@
 """
-gui/app.py — Interface Gráfica Moderna e Profissional (GUI) do DiskRescue v0.3.0.
+gui/app.py — Interface Gráfica Moderna e Profissional (GUI) do DiskRescue v0.3.1.
 Construída com Tkinter + Sun Valley (sv_ttk) no padrão Windows 11 Fluent Design.
 Oferece Navegação por Sidebar, Dashboard de Saúde, Diagnóstico & Reparo de Partições,
 Telemetria SMART ATA, Clonagem Resiliente em Duas Fases (estilo GNU ddrescue),
@@ -55,7 +55,7 @@ from core.recovery.resilient_clone import CloningResult, ResilientCloneStats, Re
 class DiskRescueApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("DiskRescue v0.3.0 — Diagnóstico, Clonagem Resiliente & Recuperação Forense")
+        self.root.title("DiskRescue v0.3.1 — Diagnóstico, Clonagem Resiliente & Recuperação Forense")
         self.root.geometry("1240x820")
         self.root.minsize(1080, 720)
 
@@ -71,6 +71,7 @@ class DiskRescueApp:
         self.disks: list[DiskInfo] = []
         self.selected_disk: Optional[DiskInfo] = None
         self.is_scanning = False
+        self.is_running = True
         self.msg_queue: queue.Queue = queue.Queue()
 
         # Controladores de cancelamento
@@ -87,6 +88,10 @@ class DiskRescueApp:
         self.current_smart_report: Optional[SmartReport] = None
         self.misaligned_pair = None
         self.ntfs_boot_diag = None
+        self.ntfs_target_partition: Optional[tuple[int, int]] = None
+
+        # Protocolo de Encerramento Gracioso da Janela
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close_window)
 
         # Navegação
         self.views: dict[str, ttk.Frame] = {}
@@ -185,7 +190,7 @@ class DiskRescueApp:
 
         version_badge = ttk.Label(
             title_row,
-            text=" v0.3.0 ",
+            text=" v0.3.1 ",
             font=("Segoe UI", 9, "bold"),
             background="#1e293b",
             foreground="#38bdf8",
@@ -967,7 +972,27 @@ class DiskRescueApp:
     def set_status(self, text: str):
         self.msg_queue.put(("status", text))
 
+    def _on_close_window(self):
+        """Encerramento limpo e seguro das threads em execução."""
+        if self.cloner_instance:
+            if not messagebox.askyesno(
+                "Confirmar Saída",
+                "Uma operação de clonagem resiliente está em andamento.\n\n"
+                "Deseja interromper a cópia, salvar o arquivo de mapa (.map) e sair com segurança?"
+            ):
+                return
+            self._cancel_clone()
+
+        if self.carver_instance and hasattr(self.carver_instance, "cancel"):
+            self.carver_instance.cancel()
+
+        self.cancel_surface_flag = True
+        self.is_running = False
+        self.root.destroy()
+
     def _start_queue_poller(self):
+        if not getattr(self, "is_running", True):
+            return
         try:
             while True:
                 kind, val = self.msg_queue.get_nowait()
@@ -981,20 +1006,82 @@ class DiskRescueApp:
                 elif kind == "scan_finished":
                     self._render_scan_results(*val)
                 elif kind == "smart_loaded":
-                    self._render_smart_results(val)
+                    if isinstance(val, tuple):
+                        self._render_smart_results(*val)
+                    else:
+                        self._render_smart_results(val)
                 elif kind == "clone_stats":
                     self._render_clone_stats(val)
+                elif kind == "clone_finished":
+                    res, status_text = val
+                    self.lbl_status.config(text=status_text)
+                    self.log(status_text)
+                elif kind == "clone_error":
+                    self.lbl_status.config(text=f"Erro na clonagem: {val}")
+                    self.log(f"ERRO NA CLONAGEM: {val}\n")
+                    messagebox.showerror("Erro de Clonagem", f"Falha na clonagem resiliente:\n{val}")
+                elif kind == "clone_ended":
+                    self.btn_start_clone.config(state=tk.NORMAL)
+                    self.btn_cancel_clone.config(state=tk.DISABLED)
+                    self.cloner_instance = None
                 elif kind == "carver_file":
                     self.carver_tree.insert(
                         "",
                         tk.END,
                         values=(val.file_id, val.file_type, f"{val.start_lba:,}", f"{val.size_bytes // 1024:,} KB", str(val.saved_path))
                     )
+                elif kind == "carver_error":
+                    self.lbl_status.config(text=f"Erro no carving: {val}")
+                    self.log(f"ERRO NO FILE CARVING: {val}\n")
+                    messagebox.showerror("Erro no File Carving", f"Falha durante o carving:\n{val}")
+                elif kind == "carver_ended":
+                    self.btn_start_carve.config(state=tk.NORMAL)
+                    self.carver_instance = None
                 elif kind == "surface_block":
                     self._draw_surface_block(*val)
+                elif kind == "surface_finished":
+                    summary = val
+                    self.lbl_status.config(text=f"Teste de superfície concluído: {summary.total_tested_blocks:,} blocos testados.")
+                    self.log(f"Teste de superfície concluído: {summary.total_tested_blocks:,} blocos, {summary.bad_count} bad blocks.\n")
+                elif kind == "surface_error":
+                    self.lbl_status.config(text=f"Erro no teste de superfície: {val}")
+                    self.log(f"ERRO NO TESTE DE SUPERFÍCIE: {val}\n")
+                    messagebox.showerror("Erro de Superfície", f"Falha no teste de superfície:\n{val}")
+                elif kind == "surface_ended":
+                    self.btn_start_surface.config(state=tk.NORMAL)
+                    self.btn_cancel_surface.config(state=tk.DISABLED)
+                elif kind == "repair_result":
+                    res = val
+                    if res.success:
+                        self.log(f"SUCESSO NO REPARO: {res.message}\n")
+                        messagebox.showinfo("Sucesso", f"Partição realinhada com sucesso!\n{res.message}")
+                    else:
+                        self.log(f"FALHA NO REPARO: {res.message}\n")
+                        messagebox.showerror("Falha no Reparo", res.message)
+                    self.btn_repair.config(state=tk.NORMAL)
+                elif kind == "repair_error":
+                    self.log(f"ERRO CRÍTICO NO REPARO: {val}\n")
+                    messagebox.showerror("Erro Crítico", f"Exceção durante reparo:\n{val}")
+                    self.btn_repair.config(state=tk.NORMAL)
+                elif kind == "boot_restore_result":
+                    res = val
+                    if res.success:
+                        self.log(f"SUCESSO NA RESTAURAÇÃO: {res.message}\n")
+                        if res.backup_file:
+                            self.log(f"Snapshot preventivo salvo em: {res.backup_file}\n")
+                        messagebox.showinfo("Sucesso", f"Boot Sector NTFS restaurado com sucesso!\n\n{res.message}")
+                    else:
+                        self.log(f"FALHA NA RESTAURAÇÃO: {res.message}\n")
+                        messagebox.showerror("Falha na Restauração", res.message)
+                    self.btn_repair_boot.config(state=tk.NORMAL)
+                elif kind == "boot_restore_error":
+                    self.log(f"ERRO NA RESTAURAÇÃO: {val}\n")
+                    messagebox.showerror("Erro Crítico", f"Falha inesperada durante restauração de Boot Sector:\n{val}")
+                    self.btn_repair_boot.config(state=tk.NORMAL)
         except queue.Empty:
             pass
-        self.root.after(80, self._start_queue_poller)
+        if getattr(self, "is_running", True):
+            self.root.after(80, self._start_queue_poller)
 
     # ── TEMA E ELEVAÇÃO ───────────────────────────────────────────────────────
     def _toggle_theme(self):
@@ -1081,8 +1168,15 @@ class DiskRescueApp:
 
         # Consulta Telemetria SMART em background
         def smart_worker():
-            report = query_smart_report_windows(d.number, d.device_path, d.friendly_name, d.serial_number)
-            self.msg_queue.put(("smart_loaded", report))
+            report = query_smart_report_windows(
+                d.number,
+                d.device_path,
+                d.friendly_name,
+                d.serial_number,
+                is_usb=(d.bus_type.upper() == "USB"),
+                bus_type=d.bus_type
+            )
+            self.msg_queue.put(("smart_loaded", (report, d)))
 
         threading.Thread(target=smart_worker, daemon=True).start()
 
@@ -1104,7 +1198,7 @@ class DiskRescueApp:
         )
 
     # ── RENDERIZAÇÃO DA TELEMETRIA S.M.A.R.T. ─────────────────────────────────
-    def _render_smart_results(self, report: SmartReport):
+    def _render_smart_results(self, report: SmartReport, disk: DiskInfo | None = None):
         self.current_smart_report = report
 
         temp_str = f"{report.temperature_c} °C" if report.temperature_c else "--"
@@ -1131,6 +1225,14 @@ class DiskRescueApp:
         full_text = f"DIRETRIZ RECOMENDADA:\n{report.action_recommendation}\n\nDETALHES DO FIRMWARE:\n{lines}"
         self.lbl_smart_text.config(text=full_text)
 
+        # Determina honestamente se o dispositivo é USB para diferenciar telemetria indisponível
+        target_disk = disk or self.selected_disk
+        is_usb = (
+            (target_disk and target_disk.bus_type.upper() == "USB") or
+            ("usb" in (report.hipotese_provavel or "").lower()) or
+            ("usb" in report.action_recommendation.lower())
+        )
+
         # Atualiza badge de saúde no Dashboard
         if risk_val == "Verde":
             self.dash_health_badge.config(text="● Confiável / Saudável", background="#14532d", foreground="#4ade80")
@@ -1139,7 +1241,10 @@ class DiskRescueApp:
         elif risk_val == "Vermelho":
             self.dash_health_badge.config(text="● Crítico / Risco de Falha Iminente", background="#7f1d1d", foreground="#fca5a5")
         else:
-            self.dash_health_badge.config(text="● Telemetria ATA Indisponível (USB)", background="#334155", foreground="#94a3b8")
+            if is_usb:
+                self.dash_health_badge.config(text="● Telemetria Não Disponível (Interface USB)", background="#334155", foreground="#94a3b8")
+            else:
+                self.dash_health_badge.config(text="● Telemetria S.M.A.R.T. Não Disponível / Indeterminada", background="#334155", foreground="#94a3b8")
 
         self.dash_recommendation.config(text=f"Diretriz Recomendada: {report.action_recommendation}")
 
@@ -1170,11 +1275,53 @@ class DiskRescueApp:
                 self.log(f"Erro ao ler tabelas de partição: {e}")
 
             fs_list = scan_boot_sectors(target_disk.device_path, max_lba=1_500_000)
-            self.msg_queue.put(("scan_finished", (gpt, mbr, fs_list, target_disk)))
+
+            # Diagnóstico de integridade do Boot Sector NTFS nas partições candidatas
+            ntfs_boot_diag = None
+            ntfs_target_partition = None
+            try:
+                if gpt and gpt.partitions:
+                    for p in gpt.partitions:
+                        total_p_sectors = p.last_lba - p.first_lba + 1
+                        if total_p_sectors > 2048:
+                            diag = diagnose_ntfs_boot_sectors(target_disk.device_path, p.first_lba, total_p_sectors)
+                            if diag.can_repair:
+                                ntfs_boot_diag = diag
+                                ntfs_target_partition = (p.first_lba, total_p_sectors)
+                                break
+                            elif diag.primary_valid and not ntfs_boot_diag:
+                                ntfs_boot_diag = diag
+                                ntfs_target_partition = (p.first_lba, total_p_sectors)
+                elif mbr and mbr.has_valid_signature:
+                    for p in mbr.partitions:
+                        if not p.is_empty and p.size_sectors > 2048:
+                            diag = diagnose_ntfs_boot_sectors(target_disk.device_path, p.start_lba, p.size_sectors)
+                            if diag.can_repair:
+                                ntfs_boot_diag = diag
+                                ntfs_target_partition = (p.start_lba, p.size_sectors)
+                                break
+                            elif diag.primary_valid and not ntfs_boot_diag:
+                                ntfs_boot_diag = diag
+                                ntfs_target_partition = (p.start_lba, p.size_sectors)
+                elif fs_list:
+                    for fs in fs_list:
+                        if fs.fs_type == "NTFS":
+                            diag = diagnose_ntfs_boot_sectors(target_disk.device_path, fs.start_lba, fs.total_sectors)
+                            if diag.can_repair:
+                                ntfs_boot_diag = diag
+                                ntfs_target_partition = (fs.start_lba, fs.total_sectors)
+                                break
+                            elif not ntfs_boot_diag:
+                                ntfs_boot_diag = diag
+                                ntfs_target_partition = (fs.start_lba, fs.total_sectors)
+            except Exception as e:
+                self.log(f"Aviso durante diagnóstico de boot sectors: {e}")
+
+            self.msg_queue.put(("scan_finished", (gpt, mbr, fs_list, target_disk, ntfs_boot_diag, ntfs_target_partition)))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _render_scan_results(self, gpt, mbr, fs_list, disk: DiskInfo):
+    def _render_scan_results(self, gpt, mbr, fs_list, disk: DiskInfo, ntfs_boot_diag=None, ntfs_target_partition=None):
         self.is_scanning = False
         self.progress_bar.stop()
         self.progress_bar.pack_forget()
@@ -1185,7 +1332,8 @@ class DiskRescueApp:
         self.current_mbr = mbr
         self.current_filesystems = fs_list
         self.misaligned_pair = None
-        self.ntfs_boot_diag = None
+        self.ntfs_boot_diag = ntfs_boot_diag
+        self.ntfs_target_partition = ntfs_target_partition
 
         # Limpa árvore de partições do Dashboard
         for item in self.dash_tree.get_children():
@@ -1253,21 +1401,108 @@ class DiskRescueApp:
                     break
 
         if not has_misalignment:
-            self.lbl_repair_diagnosis.config(text="✔ Geometria Consistente: A tabela de partições coincide com os sistemas de arquivos reais.")
+            if ntfs_boot_diag and ntfs_boot_diag.can_repair:
+                self.lbl_repair_diagnosis.config(
+                    text=f"🚨 VBR CORROMPIDO: Boot Sector primário NTFS no LBA {ntfs_boot_diag.primary_lba:,} inválido, "
+                         f"mas Backup íntegro no LBA {ntfs_boot_diag.backup_lba:,}! Restauração recomendada."
+                )
+            else:
+                self.lbl_repair_diagnosis.config(text="✔ Geometria Consistente: A tabela de partições coincide com os sistemas de arquivos reais.")
             self.btn_repair.config(state=tk.DISABLED)
+
+        # Habilita ou desabilita o botão de restauração de Boot Sector NTFS
+        if ntfs_boot_diag and ntfs_boot_diag.can_repair:
+            self.btn_repair_boot.config(state=tk.NORMAL)
+        else:
+            self.btn_repair_boot.config(state=tk.DISABLED)
 
     # ── REPAROS CIRÚRGICOS ────────────────────────────────────────────────────
     def _execute_boot_restore(self):
         if not self.selected_disk:
+            messagebox.showwarning("Aviso", "Selecione um disco de origem.")
             return
+
+        target_disk = self.selected_disk
+        diag = self.ntfs_boot_diag
+        part_info = self.ntfs_target_partition
+
+        # Se ainda não diagnosticado, tenta identificar partição candidata
+        if not diag or not part_info:
+            if self.current_gpt and self.current_gpt.partitions:
+                p = self.current_gpt.partitions[0]
+                part_info = (p.first_lba, p.last_lba - p.first_lba + 1)
+                diag = diagnose_ntfs_boot_sectors(target_disk.device_path, part_info[0], part_info[1])
+            elif self.current_mbr and self.current_mbr.partitions:
+                p_cand = [p for p in self.current_mbr.partitions if not p.is_empty]
+                if p_cand:
+                    p = p_cand[0]
+                    part_info = (p.start_lba, p.size_sectors)
+                    diag = diagnose_ntfs_boot_sectors(target_disk.device_path, part_info[0], part_info[1])
+            elif self.current_filesystems:
+                for fs in self.current_filesystems:
+                    if fs.fs_type == "NTFS":
+                        part_info = (fs.start_lba, fs.total_sectors)
+                        diag = diagnose_ntfs_boot_sectors(target_disk.device_path, part_info[0], part_info[1])
+                        break
+
+        if not diag:
+            messagebox.showinfo(
+                "Diagnóstico Requerido",
+                "Nenhuma partição candidata a NTFS identificada. Execute a 'Varredura de Geometria' primeiro."
+            )
+            return
+
+        if diag.primary_valid:
+            messagebox.showinfo(
+                "Setor Íntegro",
+                f"O setor de boot primário NTFS no LBA {diag.primary_lba:,} já é válido e validado com $MFT.\n\n"
+                "Nenhuma restauração necessária."
+            )
+            return
+
+        if not diag.backup_valid:
+            messagebox.showerror(
+                "Backup Inconsistente",
+                f"Não foi possível restaurar: o setor de backup no LBA {diag.backup_lba:,} também está inválido ou ausente."
+            )
+            return
+
+        if not diag.can_repair:
+            messagebox.showwarning(
+                "Não Reparável",
+                "As condições de integridade para restauração segura não foram atendidas.\n\n" + diag.details
+            )
+            return
+
         confirm = messagebox.askyesno(
-            "Confirmar Restauração de Boot Sector",
-            "Deseja buscar o Backup Boot Sector no último setor do volume e restaurar o setor 0 corrompido?\n\n"
-            "Um snapshot preventivo dos setores originais será salvo na pasta backups/ antes da alteração."
+            "⚠️ Confirmar Restauração de Boot Sector NTFS",
+            f"Disco: {target_disk.friendly_name} ({target_disk.device_path})\n\n"
+            f"• Setor Primário Corrompido: LBA {diag.primary_lba:,}\n"
+            f"• Setor Backup Íntegro: LBA {diag.backup_lba:,}\n\n"
+            f"Um snapshot preventivo do setor primário será gravado na pasta 'backups/' antes de copiar o backup.\n\n"
+            f"Deseja regravar o setor primário a partir do backup agora?"
         )
         if not confirm:
             return
-        messagebox.showinfo("Informação", "Inspecionando setores de backup...")
+
+        self.btn_repair_boot.config(state=tk.DISABLED)
+        self.set_status("Restaurando Boot Sector NTFS via Backup...")
+        self.log(f"Iniciando restauração de Boot Sector NTFS no LBA {diag.primary_lba:,} a partir do backup {diag.backup_lba:,}...")
+
+        start_lba, total_sec = part_info
+
+        def worker():
+            try:
+                res = restore_ntfs_boot_from_backup(
+                    target_disk.device_path,
+                    start_lba,
+                    total_sec
+                )
+                self.msg_queue.put(("boot_restore_result", res))
+            except Exception as exc:
+                self.msg_queue.put(("boot_restore_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _execute_repair(self):
         if not self.selected_disk or not self.misaligned_pair:
@@ -1279,19 +1514,21 @@ class DiskRescueApp:
             "⚠️ Confirmação Crítica de Reparo de Partição",
             f"Você está prestes a regravar as tabelas GPT Primária e Backup do disco {target_disk.friendly_name} ({target_disk.device_path}).\n\n"
             f"Realinhamento: Partição {part_idx} -> Novo LBA {fs.start_lba:,}.\n\n"
-            f"Um snapshot binário preventivo (LBA 0..33) será gravado na pasta backups/ antes de qualquer alteração física.\n\n"
+            f"Snapshots binários preventivos das tabelas GPT Primária e Backup serão salvos na pasta backups/ antes de qualquer alteração física.\n\n"
             f"Deseja prosseguir com a gravação?"
         ):
             return
 
+        self.btn_repair.config(state=tk.DISABLED)
+        self.set_status("Realinhando partição GPT...")
+        self.log(f"Iniciando realinhamento da partição {part_idx} para LBA {fs.start_lba:,} em {target_disk.device_path}...")
+
         def worker():
-            res = repair_gpt_partition_offset(target_disk.device_path, part_idx, fs)
-            if res.success:
-                self.log(f"SUCESSO NO REPARO: {res.message}")
-                messagebox.showinfo("Sucesso", f"Partição realinhada com sucesso!\n{res.message}")
-            else:
-                self.log(f"FALHA: {res.message}")
-                messagebox.showerror("Falha no Reparo", res.message)
+            try:
+                res = repair_gpt_partition_offset(target_disk.device_path, part_idx, fs)
+                self.msg_queue.put(("repair_result", res))
+            except Exception as exc:
+                self.msg_queue.put(("repair_error", str(exc)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1342,19 +1579,22 @@ class DiskRescueApp:
             self.msg_queue.put(("clone_stats", stats))
 
         def worker():
-            res = cloner.run(progress_cb=progress_cb)
-            if not res.success:
-                status_text = "Clonagem interrompida pelo operador. Mapa salvo para retomada."
-            elif res.fully_recovered:
-                status_text = f"Clonagem 100% concluída: {res.rescued_sectors:,} setores resgatados com sucesso."
-            else:
-                status_text = (
-                    f"Clonagem concluída com resgate parcial: {res.rescued_sectors:,} setores OK, "
-                    f"{res.bad_sectors:,} bad sectors identificados."
-                )
-            self.msg_queue.put(("status", status_text))
-            self.btn_start_clone.config(state=tk.NORMAL)
-            self.btn_cancel_clone.config(state=tk.DISABLED)
+            try:
+                res = cloner.run(progress_cb=progress_cb)
+                if not res.success:
+                    status_text = "Clonagem interrompida pelo operador. Mapa salvo para retomada."
+                elif res.fully_recovered:
+                    status_text = f"Clonagem 100% concluída: {res.rescued_sectors:,} setores resgatados com sucesso."
+                else:
+                    status_text = (
+                        f"Clonagem concluída com resgate parcial: {res.rescued_sectors:,} setores OK, "
+                        f"{res.bad_sectors:,} bad sectors identificados."
+                    )
+                self.msg_queue.put(("clone_finished", (res, status_text)))
+            except Exception as exc:
+                self.msg_queue.put(("clone_error", str(exc)))
+            finally:
+                self.msg_queue.put(("clone_ended", None))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1419,11 +1659,16 @@ class DiskRescueApp:
             self.set_status(f"Varrendo LBA {cur:,} de {total:,} — {count} arquivos resgatados")
 
         def worker():
-            files = carver.scan(max_sectors=1_000_000, progress_cb=progress_cb)
-            for f in files:
-                self.msg_queue.put(("carver_file", f))
-            self.set_status(f"File Carving finalizado: {len(files)} arquivos resgatados com sucesso!")
-            self.btn_start_carve.config(state=tk.NORMAL)
+            try:
+                files = carver.scan(max_sectors=1_000_000, progress_cb=progress_cb)
+                for f in files:
+                    self.msg_queue.put(("carver_file", f))
+                self.msg_queue.put(("status", f"File Carving finalizado: {len(files)} arquivos resgatados com sucesso!"))
+                self.msg_queue.put(("log", f"File Carving finalizado: {len(files)} arquivos gravados em {out_path}\n"))
+            except Exception as exc:
+                self.msg_queue.put(("carver_error", str(exc)))
+            finally:
+                self.msg_queue.put(("carver_ended", None))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1444,14 +1689,18 @@ class DiskRescueApp:
             self.msg_queue.put(("surface_block", (res, summary)))
 
         def worker():
-            scan_surface_latency(
-                target_disk.device_path,
-                max_sectors=100_000,
-                progress_cb=block_cb,
-                cancel_check=lambda: self.cancel_surface_flag
-            )
-            self.btn_start_surface.config(state=tk.NORMAL)
-            self.btn_cancel_surface.config(state=tk.DISABLED)
+            try:
+                summary = scan_surface_latency(
+                    target_disk.device_path,
+                    max_sectors=100_000,
+                    progress_cb=block_cb,
+                    cancel_check=lambda: self.cancel_surface_flag
+                )
+                self.msg_queue.put(("surface_finished", summary))
+            except Exception as exc:
+                self.msg_queue.put(("surface_error", str(exc)))
+            finally:
+                self.msg_queue.put(("surface_ended", None))
 
         threading.Thread(target=worker, daemon=True).start()
 
