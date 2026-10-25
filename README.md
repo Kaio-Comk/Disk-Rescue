@@ -1,7 +1,7 @@
 # 🛠️ DiskRescue
 
 [![Release](https://img.shields.io/github/v/release/Kaio-Comk/Disk-Rescue?color=blue&label=Vers%C3%A3o)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)
-[![Tests](https://img.shields.io/badge/Testes-117%2F117%20Aprovados-success)](https://github.com/Kaio-Comk/Disk-Rescue)
+[![Tests](https://img.shields.io/badge/Testes-118%2F118%20Aprovados-success)](https://github.com/Kaio-Comk/Disk-Rescue)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-blue?logo=python)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Plataforma-Windows%2011%20Fluent-0078d4?logo=windows)](https://github.com/Kaio-Comk/Disk-Rescue)
 [![License](https://img.shields.io/badge/Licen%C3%A7a-MIT-green)](LICENSE)
@@ -18,7 +18,7 @@ A aplicação conta com uma interface desktop moderna no padrão **Windows 11 Fl
 
 > **Nota de Governança de Versão:**
 > * **Última Release Oficial Publicada no GitHub:** `v0.3.2` (`32,772,109` bytes, SHA-256 `F37801262B94D03D1A442126A88311BCBA86AA94FB5B65624418CC65B54443E4`).
-> * **Versão Local Validada (Candidata Local):** `v0.3.3` (`32,788,317` bytes / ~31.27 MB, SHA-256 `E8071A15BD058A35E934F37205FCF1B75BE5D1A16EFA6545155EB53DF6B77AB2`, 117/117 testes aprovados).
+> * **Versão Local Validada (Candidata Local):** `v0.3.3` (`32,795,107` bytes / ~31.28 MB, SHA-256 `AA37F160DB727456EAA79FA675822781CD20FA5DEBE0754BCEDA0372BAAF512F`, 118/118 testes aprovados).
 
 Baixe a última release oficial publicada no GitHub:
 👉 **[Baixar DiskRescue v0.3.2 (Release Oficial Publicada)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)**
@@ -29,9 +29,9 @@ Baixe a última release oficial publicada no GitHub:
     ```text
     F37801262B94D03D1A442126A88311BCBA86AA94FB5B65624418CC65B54443E4
     ```
-  * **Build Local Validado (`v0.3.3` candidata local — 32,788,317 bytes):**
+  * **Build Local Validado (`v0.3.3` candidata local — 32,795,107 bytes):**
     ```text
-    E8071A15BD058A35E934F37205FCF1B75BE5D1A16EFA6545155EB53DF6B77AB2
+    AA37F160DB727456EAA79FA675822781CD20FA5DEBE0754BCEDA0372BAAF512F
     ```
 * **Elevação UAC Automática:** Manifest embutido solicita privilégios de Administrador ao iniciar, garantindo acesso direto de baixo nível (`\\.\PhysicalDriveX`).
 * **Identidade Visual Nativa:** Ícone `.ico` oficial embutido no executável (resoluções de 16x16 a 256x256).
@@ -149,12 +149,12 @@ O DiskRescue foi concebido com foco absoluto na integridade física e preservaç
 
 ## 🧪 Cobertura de Testes Automatizados
 
-O sistema conta com suíte completa de **117 testes unitários, concorrentes e de integração de interface** automatizados:
+O sistema conta com suíte completa de **118 testes unitários, concorrentes e de integração de interface** automatizados:
 
 ```bash
 $ pytest tests/ -v
 ...
-============================ 117 passed in 33.99s =============================
+============================ 118 passed in 25.60s =============================
 ```
 
 ---

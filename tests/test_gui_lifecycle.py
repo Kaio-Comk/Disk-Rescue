@@ -581,5 +581,33 @@ def test_gui_clone_existing_image_prompts_confirmation_and_preserves_on_decline(
     assert existing_dst.read_bytes() == b"\xAA" * 4096
 
 
+def test_gui_theme_toggle_updates_all_styled_widgets(mock_gui):
+    """
+    Valida que a alternância de tema (Escuro <-> Claro) sincroniza todos os painéis de código/log
+    (txt_gpt, txt_fs, txt_console), o canvas de superfície e os cartões customizados sem erro.
+    """
+    from gui.app import HAS_SV_TTK, PALETTES
+
+    app, root = mock_gui
+    assert app.current_theme == "dark"
+    assert app.txt_gpt.cget("bg").lower() == PALETTES["dark"]["bg_input"].lower()
+    assert app.txt_fs.cget("bg").lower() == PALETTES["dark"]["bg_input"].lower()
+    assert app.txt_console.cget("bg").lower() == PALETTES["dark"]["bg_input"].lower()
+
+    if HAS_SV_TTK:
+        app._toggle_theme()
+        root.update()
+        assert app.current_theme == "light"
+        assert app.txt_gpt.cget("bg").lower() == PALETTES["light"]["bg_input"].lower()
+        assert app.txt_fs.cget("bg").lower() == PALETTES["light"]["bg_input"].lower()
+        assert app.txt_console.cget("bg").lower() == PALETTES["light"]["bg_input"].lower()
+
+        app._toggle_theme()
+        root.update()
+        assert app.current_theme == "dark"
+        assert app.txt_gpt.cget("bg").lower() == PALETTES["dark"]["bg_input"].lower()
+
+
+
 
 

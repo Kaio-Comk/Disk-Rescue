@@ -1,12 +1,14 @@
 """
 gui/app.py — Interface Gráfica Moderna e Profissional (GUI) do DiskRescue v0.3.3.
-Construída com Tkinter + Sun Valley (sv_ttk) no padrão Windows 11 Fluent Design.
+Construída com Tkinter + Sun Valley (sv_ttk) + Design System Fluent Obsidian/Slate,
+com suporte nativo a High-DPI Per-Monitor v2 e Barra de Título Escura DWM do Windows 11.
 Oferece Navegação por Sidebar, Dashboard de Saúde, Diagnóstico & Reparo de Partições,
 Telemetria SMART ATA, Clonagem Resiliente em Duas Fases (estilo GNU ddrescue),
 File Carving por Assinaturas Mágicas, Heatmap de Latência de Superfície e Log Forense.
 """
 from __future__ import annotations
 
+import ctypes
 import os
 import queue
 import subprocess
@@ -57,6 +59,114 @@ from core.recovery.repair import repair_gpt_partition_offset
 from core.recovery.resilient_clone import CloningResult, ResilientCloneStats, ResilientCloner
 
 
+# ── PALETAS DE DESIGN FLUENT OBSIDIAN / SLATE ────────────────────────────────
+PALETTES: dict[str, dict[str, str]] = {
+    "dark": {
+        "bg_root": "#090D16",
+        "bg_header": "#0D1322",
+        "bg_sidebar": "#0B101D",
+        "bg_card": "#111827",
+        "bg_card_alt": "#162033",
+        "bg_input": "#070B12",
+        "border": "#1E293B",
+        "border_subtle": "#172033",
+        "border_accent": "#0284C7",
+        "accent": "#0EA5E9",
+        "accent_hover": "#38BDF8",
+        "accent_soft_bg": "#0C2D48",
+        "accent_soft_fg": "#38BDF8",
+        "text_primary": "#F8FAFC",
+        "text_secondary": "#94A3B8",
+        "text_muted": "#64748B",
+        "success_bg": "#064E3B",
+        "success_fg": "#34D399",
+        "warning_bg": "#78350F",
+        "warning_fg": "#FBBF24",
+        "danger_bg": "#7F1D1D",
+        "danger_fg": "#F87171",
+        "neutral_bg": "#1E293B",
+        "neutral_fg": "#CBD5E1",
+        "tree_bg": "#0D1322",
+        "tree_alt": "#111A2E",
+        "tree_head_bg": "#162033",
+    },
+    "light": {
+        "bg_root": "#F1F5F9",
+        "bg_header": "#FFFFFF",
+        "bg_sidebar": "#F8FAFC",
+        "bg_card": "#FFFFFF",
+        "bg_card_alt": "#F8FAFC",
+        "bg_input": "#F8FAFC",
+        "border": "#CBD5E1",
+        "border_subtle": "#E2E8F0",
+        "border_accent": "#0284C7",
+        "accent": "#0284C7",
+        "accent_hover": "#0369A1",
+        "accent_soft_bg": "#E0F2FE",
+        "accent_soft_fg": "#0369A1",
+        "text_primary": "#0F172A",
+        "text_secondary": "#475569",
+        "text_muted": "#64748B",
+        "success_bg": "#DCFCE7",
+        "success_fg": "#15803D",
+        "warning_bg": "#FEF3C7",
+        "warning_fg": "#B45309",
+        "danger_bg": "#FEE2E2",
+        "danger_fg": "#B91C1C",
+        "neutral_bg": "#E2E8F0",
+        "neutral_fg": "#334155",
+        "tree_bg": "#FFFFFF",
+        "tree_alt": "#F8FAFC",
+        "tree_head_bg": "#F1F5F9",
+    },
+}
+
+
+def _enable_high_dpi() -> None:
+    """Ativa High-DPI Per-Monitor v2 no Windows para fontes e bordas ultra nítidas."""
+    if os.name != "nt":
+        return
+    try:
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+        return
+    except Exception:
+        pass
+    try:
+        # PROCESS_PER_MONITOR_DPI_AWARE = 2
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+def _apply_windows_dwm_theme(root: tk.Tk, dark: bool = True) -> None:
+    """Aplica barra de título escura nativa do Windows 11/10 (Immersive Dark Mode + Caption Color)."""
+    if os.name != "nt":
+        return
+    try:
+        hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+        if not hwnd:
+            hwnd = root.winfo_id()
+        dwmapi = ctypes.windll.dwmapi
+
+        # DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (fallback 19 em builds antigas do Win10)
+        val = ctypes.c_int(1 if dark else 0)
+        res = dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(val), ctypes.sizeof(val))
+        if res != 0:
+            dwmapi.DwmSetWindowAttribute(hwnd, 19, ctypes.byref(val), ctypes.sizeof(val))
+
+        # No Windows 11 (Build 22000+), DWMWA_CAPTION_COLOR = 35 e DWMWA_TEXT_COLOR = 36 (formato COLORREF 0x00BBGGRR)
+        caption_color = ctypes.c_int(0x0022130D if dark else 0x00FFFFFF)
+        dwmapi.DwmSetWindowAttribute(hwnd, 35, ctypes.byref(caption_color), ctypes.sizeof(caption_color))
+    except Exception:
+        pass
+
+
 class OperationState(Enum):
     IDLE = "idle"
     RUNNING = "running"
@@ -71,16 +181,28 @@ class DiskRescueApp:
     def __init__(self, root: tk.Tk, auto_refresh: bool = True):
         self.root = root
         self.root.title("DiskRescue v0.3.3 — Diagnóstico, Clonagem Resiliente & Recuperação Forense")
-        self.root.geometry("1240x820")
-        self.root.minsize(1080, 720)
+        self.root.geometry("1280x850")
+        self.root.minsize(1100, 740)
 
-        # Configura ícone da janela
-        self._setup_window_icons()
+        # Listas para sincronização instantânea de tema em todos os containers customizados
+        self._themed_cards: list[tk.Widget] = []
+        self._themed_card_alts: list[tk.Widget] = []
+        self._themed_headers: list[tk.Widget] = []
+        self._themed_sidebars: list[tk.Widget] = []
+        self._themed_roots: list[tk.Widget] = []
+        self._themed_dividers: list[tk.Frame] = []
+        self._themed_text_widgets: list[tk.Text] = []
 
         # Tema e Estilos
         self.current_theme = "dark"
         if HAS_SV_TTK:
             sv_ttk.set_theme("dark")
+
+        # Configura ícone da janela e barra DWM
+        self._setup_window_icons()
+        self._configure_custom_styles()
+        self.root.configure(bg=self.palette["bg_root"])
+        _apply_windows_dwm_theme(self.root, dark=True)
 
         # Estado da Aplicação
         self.op_state: OperationState = OperationState.IDLE
@@ -115,7 +237,7 @@ class DiskRescueApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close_window)
 
         # Navegação
-        self.views: dict[str, ttk.Frame] = {}
+        self.views: dict[str, tk.Frame] = {}
         self.nav_buttons: dict[str, ttk.Button] = {}
         self.active_view = "dashboard"
 
@@ -124,6 +246,10 @@ class DiskRescueApp:
         self._start_queue_poller()
         if auto_refresh:
             self.refresh_disks()
+
+    @property
+    def palette(self) -> dict[str, str]:
+        return PALETTES[self.current_theme]
 
     # ── ÍCONES & ATIVOS ────────────────────────────────────────────────────────
     def _setup_window_icons(self):
@@ -139,6 +265,7 @@ class DiskRescueApp:
         ico_path = assets_dir / "diskrescue.ico"
         png_path = assets_dir / "diskrescue.png"
 
+        self.header_logo_photo = None
         try:
             if ico_path.exists():
                 self.root.iconbitmap(str(ico_path))
@@ -150,40 +277,219 @@ class DiskRescueApp:
                 img = Image.open(png_path)
                 self.app_icon_photo = ImageTk.PhotoImage(img)
                 self.root.iconphoto(True, self.app_icon_photo)
+                resample = getattr(Image, "Resampling", Image).LANCZOS
+                header_img = img.resize((36, 36), resample)
+                self.header_logo_photo = ImageTk.PhotoImage(header_img)
         except Exception:
             pass
 
+    # ── SISTEMA DE ESTILOS TTK CUSTOMIZADO ────────────────────────────────────
+    def _configure_custom_styles(self):
+        p = self.palette
+        style = ttk.Style(self.root)
+
+        # Frames principais
+        style.configure("Root.TFrame", background=p["bg_root"])
+        style.configure("Header.TFrame", background=p["bg_header"])
+        style.configure("Sidebar.TFrame", background=p["bg_sidebar"])
+        style.configure("Card.TFrame", background=p["bg_card"])
+        style.configure("CardAlt.TFrame", background=p["bg_card_alt"])
+
+        # Labels contextuais
+        style.configure("HeaderTitle.TLabel", background=p["bg_header"], foreground=p["text_primary"], font=("Segoe UI Semibold", 15, "bold"))
+        style.configure("HeaderSub.TLabel", background=p["bg_header"], foreground=p["text_secondary"], font=("Segoe UI", 8))
+        style.configure("SidebarSection.TLabel", background=p["bg_sidebar"], foreground=p["text_muted"], font=("Segoe UI Semibold", 8, "bold"))
+        style.configure("CardTitle.TLabel", background=p["bg_card"], foreground=p["text_primary"], font=("Segoe UI Semibold", 10, "bold"))
+        style.configure("CardSub.TLabel", background=p["bg_card"], foreground=p["text_secondary"], font=("Segoe UI", 8))
+        style.configure("CardBody.TLabel", background=p["bg_card"], foreground=p["text_primary"], font=("Segoe UI", 9))
+        style.configure("CardMuted.TLabel", background=p["bg_card"], foreground=p["text_secondary"], font=("Segoe UI", 8))
+        style.configure("AltTitle.TLabel", background=p["bg_card_alt"], foreground=p["text_primary"], font=("Segoe UI Semibold", 9, "bold"))
+        style.configure("AltMuted.TLabel", background=p["bg_card_alt"], foreground=p["text_secondary"], font=("Segoe UI", 8))
+        style.configure("AltMetric.TLabel", background=p["bg_card_alt"], foreground=p["text_primary"], font=("Segoe UI Semibold", 14, "bold"))
+        style.configure("ViewTitle.TLabel", background=p["bg_root"], foreground=p["text_primary"], font=("Segoe UI Semibold", 13, "bold"))
+        style.configure("ViewSub.TLabel", background=p["bg_root"], foreground=p["text_secondary"], font=("Segoe UI", 9))
+        style.configure("Status.TLabel", background=p["bg_header"], foreground=p["text_secondary"], font=("Segoe UI", 9))
+
+        # Botões da Sidebar (alinhados à esquerda com respiro moderno)
+        style.configure(
+            "Nav.TButton",
+            font=("Segoe UI Semibold", 9),
+            anchor="w",
+            padding=(12, 9),
+        )
+        style.configure(
+            "NavActive.TButton",
+            font=("Segoe UI Semibold", 9, "bold"),
+            anchor="w",
+            padding=(12, 9),
+        )
+
+        # Tabelas Treeview modernas (linhas mais altas, cabeçalho limpo)
+        style.configure(
+            "Treeview",
+            background=p["tree_bg"],
+            fieldbackground=p["tree_bg"],
+            foreground=p["text_primary"],
+            rowheight=30,
+            font=("Segoe UI", 9),
+            borderwidth=0,
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=p["tree_head_bg"],
+            foreground=p["text_secondary"],
+            font=("Segoe UI Semibold", 9, "bold"),
+            padding=(8, 6),
+            borderwidth=0,
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", p["accent_soft_bg"])],
+            foreground=[("selected", p["accent_soft_fg"])],
+        )
+
+    # ── COMPONENTES VISUAIS REUTILIZÁVEIS (CARDS ELEVADOS & TERMINAIS) ────────
+    def _make_card(
+        self,
+        parent: tk.Widget,
+        title: Optional[str] = None,
+        subtitle: Optional[str] = None,
+        badge_text: Optional[str] = None,
+        padding: tuple[int, int] = (14, 12),
+        alt: bool = False,
+        accent_top: Optional[str] = None,
+    ) -> tuple[tk.Frame, ttk.Frame]:
+        """Cria um Card moderno com borda sutil de 1px, substituindo o antigo ttk.LabelFrame dos anos 90."""
+        p = self.palette
+        bg_color = p["bg_card_alt"] if alt else p["bg_card"]
+        style_name = "CardAlt.TFrame" if alt else "Card.TFrame"
+        title_style = "AltTitle.TLabel" if alt else "CardTitle.TLabel"
+        sub_style = "AltMuted.TLabel" if alt else "CardSub.TLabel"
+
+        outer = tk.Frame(
+            parent,
+            bg=bg_color,
+            highlightbackground=p["border"],
+            highlightcolor=p["border_accent"],
+            highlightthickness=1,
+            bd=0,
+        )
+        if alt:
+            self._themed_card_alts.append(outer)
+        else:
+            self._themed_cards.append(outer)
+
+        if accent_top:
+            stripe = tk.Frame(outer, bg=accent_top, height=3, bd=0, highlightthickness=0)
+            stripe.pack(fill=tk.X, side=tk.TOP)
+
+        inner = ttk.Frame(outer, style=style_name, padding=padding)
+        inner.pack(fill=tk.BOTH, expand=True)
+
+        if title:
+            hdr = ttk.Frame(inner, style=style_name)
+            hdr.pack(fill=tk.X, pady=(0, 8))
+
+            lbl_t = ttk.Label(hdr, text=title, style=title_style)
+            lbl_t.pack(side=tk.LEFT, anchor=tk.W)
+
+            if badge_text:
+                lbl_b = ttk.Label(
+                    hdr,
+                    text=f" {badge_text} ",
+                    font=("Segoe UI Semibold", 8, "bold"),
+                    background=p["accent_soft_bg"],
+                    foreground=p["accent_soft_fg"],
+                    padding=(6, 2),
+                )
+                lbl_b.pack(side=tk.RIGHT, anchor=tk.E)
+
+            if subtitle:
+                lbl_s = ttk.Label(inner, text=subtitle, style=sub_style, wraplength=900)
+                lbl_s.pack(anchor=tk.W, pady=(0, 8))
+
+        body = ttk.Frame(inner, style=style_name)
+        body.pack(fill=tk.BOTH, expand=True)
+        return outer, body
+
+    def _make_styled_text(self, parent: tk.Widget, wrap: str = tk.NONE) -> tuple[tk.Frame, tk.Text]:
+        """Cria um painel de texto/código escuro moderno com borda sutil e tags coloridas."""
+        p = self.palette
+        wrapper = tk.Frame(
+            parent,
+            bg=p["bg_input"],
+            highlightbackground=p["border"],
+            highlightcolor=p["border_accent"],
+            highlightthickness=1,
+            bd=0,
+        )
+        self._themed_dividers.append(wrapper)
+
+        txt = tk.Text(
+            wrapper,
+            font=("Consolas", 9),
+            wrap=wrap,
+            bg=p["bg_input"],
+            fg=p["text_primary"],
+            insertbackground=p["accent"],
+            selectbackground=p["accent_soft_bg"],
+            selectforeground=p["text_primary"],
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            padx=12,
+            pady=10,
+        )
+        scroll = ttk.Scrollbar(wrapper, orient=tk.VERTICAL, command=txt.yview)
+        txt.configure(yscrollcommand=scroll.set)
+        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._themed_text_widgets.append(txt)
+        return wrapper, txt
+
     # ── CONSTRUÇÃO DA INTERFACE PRINCIPAL ──────────────────────────────────────
     def _build_ui(self):
+        p = self.palette
+
         # 1. Header Superior (Barra de Título Moderna)
         self._build_top_header()
 
-        # Separador sutil
-        ttk.Separator(self.root, orient=tk.HORIZONTAL).pack(fill=tk.X)
+        # Linha divisória sutil de 1px
+        div_top = tk.Frame(self.root, bg=p["border"], height=1, bd=0, highlightthickness=0)
+        div_top.pack(fill=tk.X)
+        self._themed_dividers.append(div_top)
 
         # 2. Container Central Dividido (Sidebar de Navegação + Conteúdo Dinâmico)
-        self.body_container = ttk.Frame(self.root)
+        self.body_container = ttk.Frame(self.root, style="Root.TFrame")
         self.body_container.pack(fill=tk.BOTH, expand=True)
 
         # Sidebar à Esquerda
         self._build_sidebar()
 
-        # Divisor vertical
-        ttk.Separator(self.body_container, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y)
+        # Divisor vertical de 1px
+        div_vert = tk.Frame(self.body_container, bg=p["border"], width=1, bd=0, highlightthickness=0)
+        div_vert.pack(side=tk.LEFT, fill=tk.Y)
+        self._themed_dividers.append(div_vert)
 
         # Área de Conteúdo à Direita
-        self.content_area = ttk.Frame(self.body_container, padding=(14, 10))
+        self.content_area = ttk.Frame(self.body_container, style="Root.TFrame", padding=(18, 14))
         self.content_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # Card de Seleção e Resumo do Disco Ativo (fixo no topo do conteúdo)
         self._build_drive_selector_banner()
 
         # Container onde as telas/views alternam
-        self.view_container = ttk.Frame(self.content_area)
-        self.view_container.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        self.view_container = ttk.Frame(self.content_area, style="Root.TFrame")
+        self.view_container.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
 
         # Construir todas as telas no container
         self._build_views()
+
+        # Divisor inferior de 1px
+        div_bot = tk.Frame(self.root, bg=p["border"], height=1, bd=0, highlightthickness=0)
+        div_bot.pack(fill=tk.X, side=tk.BOTTOM)
+        self._themed_dividers.append(div_bot)
 
         # 3. Barra de Status Inferior
         self._build_status_bar()
@@ -193,67 +499,75 @@ class DiskRescueApp:
 
     # ── HEADER SUPERIOR ───────────────────────────────────────────────────────
     def _build_top_header(self):
-        self.header_frame = ttk.Frame(self.root, padding=(18, 10))
+        p = self.palette
+        self.header_frame = ttk.Frame(self.root, style="Header.TFrame", padding=(20, 12))
         self.header_frame.pack(fill=tk.X, side=tk.TOP)
 
         # Bloco da Marca / Título
-        brand_box = ttk.Frame(self.header_frame)
+        brand_box = ttk.Frame(self.header_frame, style="Header.TFrame")
         brand_box.pack(side=tk.LEFT, anchor=tk.CENTER)
 
-        title_row = ttk.Frame(brand_box)
+        if self.header_logo_photo is not None:
+            logo_lbl = ttk.Label(brand_box, image=self.header_logo_photo, style="HeaderTitle.TLabel")
+            logo_lbl.pack(side=tk.LEFT, padx=(0, 12))
+
+        text_stack = ttk.Frame(brand_box, style="Header.TFrame")
+        text_stack.pack(side=tk.LEFT, anchor=tk.CENTER)
+
+        title_row = ttk.Frame(text_stack, style="Header.TFrame")
         title_row.pack(anchor=tk.W)
 
         app_title = ttk.Label(
             title_row,
-            text="🛠️  DiskRescue",
-            font=("Segoe UI Variable Display", 16, "bold")
+            text="DiskRescue",
+            style="HeaderTitle.TLabel",
         )
         app_title.pack(side=tk.LEFT, anchor=tk.CENTER)
 
-        version_badge = ttk.Label(
+        self.lbl_version_badge = ttk.Label(
             title_row,
-            text=" v0.3.3 ",
-            font=("Segoe UI", 9, "bold"),
-            background="#1e293b",
-            foreground="#38bdf8",
-            padding=(4, 1)
+            text=" v0.3.3 PRO ",
+            font=("Segoe UI Semibold", 8, "bold"),
+            background=p["accent_soft_bg"],
+            foreground=p["accent_soft_fg"],
+            padding=(6, 2),
         )
-        version_badge.pack(side=tk.LEFT, padx=(8, 0), anchor=tk.CENTER)
+        self.lbl_version_badge.pack(side=tk.LEFT, padx=(10, 0), anchor=tk.CENTER)
 
         app_subtitle = ttk.Label(
-            brand_box,
-            text="Diagnóstico de Hardware, Clonagem Resiliente & Recuperação Lógica de Armazenamento",
-            font=("Segoe UI", 8)
+            text_stack,
+            text="Diagnóstico de Hardware, Clonagem Resiliente & Recuperação Forense de Partições",
+            style="HeaderSub.TLabel",
         )
         app_subtitle.pack(anchor=tk.W, pady=(2, 0))
 
         # Bloco de Ações e Status do Sistema (à Direita)
-        actions_box = ttk.Frame(self.header_frame)
+        actions_box = ttk.Frame(self.header_frame, style="Header.TFrame")
         actions_box.pack(side=tk.RIGHT, anchor=tk.CENTER)
 
         # Badge UAC
         elevated = is_admin()
-        uac_bg = "#14532d" if elevated else "#7c2d12"
-        uac_fg = "#4ade80" if elevated else "#fca5a5"
+        uac_bg = p["success_bg"] if elevated else p["warning_bg"]
+        uac_fg = p["success_fg"] if elevated else p["warning_fg"]
         uac_text = "🛡️ Administrador Ativo (Acesso Raw)" if elevated else "⚠️ Modo Leitura (Sem UAC)"
 
         self.lbl_uac = ttk.Label(
             actions_box,
             text=uac_text,
-            font=("Segoe UI", 8, "bold"),
+            font=("Segoe UI Semibold", 8, "bold"),
             background=uac_bg,
             foreground=uac_fg,
-            padding=(8, 4)
+            padding=(10, 5),
         )
         self.lbl_uac.pack(side=tk.LEFT, padx=(0, 10))
 
         if not elevated:
             self.btn_elevate = ttk.Button(
                 actions_box,
-                text="Elevar UAC",
+                text="⚡ Elevar UAC",
                 command=self._on_elevate,
                 style="Accent.TButton",
-                width=11
+                width=12,
             )
             self.btn_elevate.pack(side=tk.LEFT, padx=(0, 8))
 
@@ -262,7 +576,7 @@ class DiskRescueApp:
             actions_box,
             text="🔄 Atualizar Discos",
             command=self.refresh_disks,
-            width=16
+            width=16,
         )
         self.btn_refresh.pack(side=tk.LEFT, padx=(0, 8))
 
@@ -272,31 +586,31 @@ class DiskRescueApp:
                 actions_box,
                 text="🌙 Escuro",
                 command=self._toggle_theme,
-                width=10
+                width=10,
             )
             self.btn_theme.pack(side=tk.LEFT)
 
     # ── SIDEBAR DE NAVEGAÇÃO ──────────────────────────────────────────────────
     def _build_sidebar(self):
-        self.sidebar_frame = ttk.Frame(self.body_container, width=225, padding=(10, 12))
+        p = self.palette
+        self.sidebar_frame = ttk.Frame(self.body_container, style="Sidebar.TFrame", width=240, padding=(12, 16))
         self.sidebar_frame.pack(side=tk.LEFT, fill=tk.Y)
         self.sidebar_frame.pack_propagate(False)
 
         ttk.Label(
             self.sidebar_frame,
-            text="MÓDULOS DO SISTEMA",
-            font=("Segoe UI", 8, "bold"),
-            foreground="#64748b"
-        ).pack(anchor=tk.W, pady=(0, 8), padx=4)
+            text="MÓDULOS DE OPERAÇÃO",
+            style="SidebarSection.TLabel",
+        ).pack(anchor=tk.W, pady=(0, 10), padx=6)
 
         nav_items = [
-            ("dashboard", "📊  Visão Geral"),
-            ("diagnostic", "🔍  Diagnóstico & Reparo"),
-            ("smart", "📈  Telemetria S.M.A.R.T."),
-            ("clone", "💾  Clonagem Resiliente"),
-            ("carver", "🔬  File Carving"),
-            ("surface", "⚡  Varredura Superfície"),
-            ("logs", "📝  Console de Logs"),
+            ("dashboard", "📊   Visão Geral"),
+            ("diagnostic", "🔍   Diagnóstico & Reparo"),
+            ("smart", "📈   Telemetria S.M.A.R.T."),
+            ("clone", "💾   Clonagem Resiliente"),
+            ("carver", "🔬   File Carving Forense"),
+            ("surface", "⚡   Varredura Superfície"),
+            ("logs", "📝   Console de Auditoria"),
         ]
 
         for key, label in nav_items:
@@ -304,23 +618,42 @@ class DiskRescueApp:
                 self.sidebar_frame,
                 text=label,
                 command=lambda k=key: self._switch_view(k),
-                style="TButton"
+                style="Nav.TButton",
             )
             btn.pack(fill=tk.X, pady=3)
             self.nav_buttons[key] = btn
 
         # Card de Resumo do Disco no Rodapé da Sidebar
-        self.mini_drive_box = ttk.LabelFrame(self.sidebar_frame, text="Disco Ativo", padding=8)
-        self.mini_drive_box.pack(side=tk.BOTTOM, fill=tk.X, pady=(12, 0))
+        self.mini_drive_outer, self.mini_drive_box = self._make_card(
+            self.sidebar_frame,
+            title="DISPOSITIVO ATIVO",
+            padding=(12, 10),
+            alt=True,
+            accent_top=p["accent"],
+        )
+        self.mini_drive_outer.pack(side=tk.BOTTOM, fill=tk.X, pady=(14, 0))
 
-        self.lbl_mini_model = ttk.Label(self.mini_drive_box, text="Nenhum", font=("Segoe UI", 8, "bold"), wraplength=190)
-        self.lbl_mini_model.pack(anchor=tk.W)
+        self.lbl_mini_model = ttk.Label(
+            self.mini_drive_box,
+            text="Nenhum selecionado",
+            style="AltTitle.TLabel",
+            wraplength=195,
+        )
+        self.lbl_mini_model.pack(anchor=tk.W, pady=(0, 3))
 
-        self.lbl_mini_size = ttk.Label(self.mini_drive_box, text="Tamanho: --", font=("Segoe UI", 8))
+        self.lbl_mini_size = ttk.Label(
+            self.mini_drive_box,
+            text="Tamanho: --",
+            style="AltMuted.TLabel",
+        )
         self.lbl_mini_size.pack(anchor=tk.W)
 
-        self.lbl_mini_path = ttk.Label(self.mini_drive_box, text="Caminho: --", font=("Segoe UI", 8), foreground="#94a3b8")
-        self.lbl_mini_path.pack(anchor=tk.W)
+        self.lbl_mini_path = ttk.Label(
+            self.mini_drive_box,
+            text="Caminho: --",
+            style="AltMuted.TLabel",
+        )
+        self.lbl_mini_path.pack(anchor=tk.W, pady=(2, 0))
 
     def _switch_view(self, view_key: str):
         if view_key not in self.views:
@@ -340,78 +673,86 @@ class DiskRescueApp:
             if k == view_key:
                 btn.configure(style="Accent.TButton")
             else:
-                btn.configure(style="TButton")
+                btn.configure(style="Nav.TButton")
 
     # ── BANNER FIXO DO DISCO SELECIONADO ──────────────────────────────────────
     def _build_drive_selector_banner(self):
-        self.drive_banner = ttk.LabelFrame(self.content_area, text="Dispositivo de Armazenamento Alvo", padding=(10, 8))
-        self.drive_banner.pack(fill=tk.X, side=tk.TOP, pady=(0, 4))
+        p = self.palette
+        self.drive_banner_outer, self.drive_banner = self._make_card(
+            self.content_area,
+            padding=(14, 10),
+            accent_top=p["accent"],
+        )
+        self.drive_banner_outer.pack(fill=tk.X, side=tk.TOP, pady=(0, 4))
 
-        top_row = ttk.Frame(self.drive_banner)
+        top_row = ttk.Frame(self.drive_banner, style="Card.TFrame")
         top_row.pack(fill=tk.X)
 
-        ttk.Label(top_row, text="Disco Físico:", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(
+            top_row,
+            text="💿  Dispositivo Físico Alvo:",
+            style="CardTitle.TLabel",
+        ).pack(side=tk.LEFT, padx=(0, 10))
 
-        self.combo_disks = ttk.Combobox(top_row, state="readonly", width=46)
-        self.combo_disks.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+        self.combo_disks = ttk.Combobox(top_row, state="readonly", width=48, font=("Segoe UI", 9))
+        self.combo_disks.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 12))
         self.combo_disks.bind("<<ComboboxSelected>>", self._on_combo_disk_selected)
 
         self.lbl_drive_raw_badge = ttk.Label(
             top_row,
             text="Raw: Indefinido",
-            font=("Segoe UI", 8, "bold"),
-            background="#334155",
-            foreground="#f8fafc",
-            padding=(6, 2)
+            font=("Segoe UI Semibold", 8, "bold"),
+            background=p["neutral_bg"],
+            foreground=p["neutral_fg"],
+            padding=(10, 4),
         )
         self.lbl_drive_raw_badge.pack(side=tk.RIGHT)
 
         # Linha inferior de detalhes do hardware
-        self.drive_info_row = ttk.Frame(self.drive_banner)
-        self.drive_info_row.pack(fill=tk.X, pady=(4, 0))
+        self.drive_info_row = ttk.Frame(self.drive_banner, style="Card.TFrame")
+        self.drive_info_row.pack(fill=tk.X, pady=(6, 0))
 
         self.lbl_drive_details = ttk.Label(
             self.drive_info_row,
             text="Nenhum dispositivo selecionado. Aguardando enumeração...",
-            font=("Segoe UI", 8),
-            foreground="#94a3b8"
+            style="CardMuted.TLabel",
         )
         self.lbl_drive_details.pack(side=tk.LEFT)
 
     # ── INSTANCIAÇÃO DAS VIEWS ────────────────────────────────────────────────
     def _build_views(self):
         # 1. Dashboard
-        self.view_dashboard = ttk.Frame(self.view_container)
+        self.view_dashboard = ttk.Frame(self.view_container, style="Root.TFrame")
         self.views["dashboard"] = self.view_dashboard
         self._setup_view_dashboard()
 
         # 2. Diagnóstico & Reparo
-        self.view_diagnostic = ttk.Frame(self.view_container)
+        self.view_diagnostic = ttk.Frame(self.view_container, style="Root.TFrame")
         self.views["diagnostic"] = self.view_diagnostic
         self._setup_view_diagnostic()
 
         # 3. SMART
-        self.view_smart = ttk.Frame(self.view_container)
+        self.view_smart = ttk.Frame(self.view_container, style="Root.TFrame")
         self.views["smart"] = self.view_smart
         self._setup_view_smart()
 
         # 4. Clonagem Resiliente
-        self.view_clone = ttk.Frame(self.view_container)
+        self.view_clone = ttk.Frame(self.view_container, style="Root.TFrame")
         self.views["clone"] = self.view_clone
         self._setup_view_clone()
 
         # 5. File Carving
-        self.view_carver = ttk.Frame(self.view_container)
+        self.view_carver = ttk.Frame(self.view_container, style="Root.TFrame")
         self.views["carver"] = self.view_carver
         self._setup_view_carver()
 
         # 6. Varredura de Superfície
-        self.view_surface = ttk.Frame(self.view_container)
+        self.view_surface = ttk.Frame(self.view_container, style="Root.TFrame")
         self.views["surface"] = self.view_surface
         self._setup_view_surface()
 
         # 7. Console de Logs
-        self.view_logs = ttk.Frame(self.view_container)
+        self.view_logs = ttk.Frame(self.view_container, style="Root.TFrame")
         self.views["logs"] = self.view_logs
         self._setup_view_logs()
 
@@ -420,85 +761,118 @@ class DiskRescueApp:
     # ══════════════════════════════════════════════════════════════════════════
     def _setup_view_dashboard(self):
         f = self.view_dashboard
+        p = self.palette
 
         # Cartão de Diagnóstico de Saúde e Recomendação Técnica
-        health_box = ttk.LabelFrame(f, text="Diagnóstico Geral do Dispositivo", padding=12)
-        health_box.pack(fill=tk.X, pady=(0, 10))
+        health_outer, health_box = self._make_card(
+            f,
+            title="DIAGNÓSTICO DE SAÚDE & CONDUTA RECOMENDADA",
+            badge_text="TEMPO REAL",
+            padding=(16, 12),
+        )
+        health_outer.pack(fill=tk.X, pady=(0, 10))
 
-        h_top = ttk.Frame(health_box)
+        h_top = ttk.Frame(health_box, style="Card.TFrame")
         h_top.pack(fill=tk.X)
 
         self.dash_health_badge = ttk.Label(
             h_top,
             text="⚪ Aguardando Análise...",
-            font=("Segoe UI", 12, "bold"),
-            background="#1e293b",
-            foreground="#f8fafc",
-            padding=(8, 4)
+            font=("Segoe UI Semibold", 11, "bold"),
+            background=p["neutral_bg"],
+            foreground=p["text_primary"],
+            padding=(12, 5),
         )
         self.dash_health_badge.pack(side=tk.LEFT)
 
         self.dash_health_title = ttk.Label(
             h_top,
             text="Selecione um disco para carregar o resumo de confiabilidade.",
-            font=("Segoe UI", 10, "bold")
+            font=("Segoe UI Semibold", 11, "bold"),
+            style="CardBody.TLabel",
         )
-        self.dash_health_title.pack(side=tk.LEFT, padx=(12, 0))
+        self.dash_health_title.pack(side=tk.LEFT, padx=(14, 0))
 
         self.dash_recommendation = ttk.Label(
             health_box,
             text="Diretriz: O sistema analisará dados de firmware, setores e boot sectors para orientar a conduta recomendada.",
-            font=("Segoe UI", 9),
-            wraplength=950,
-            justify=tk.LEFT
+            style="CardMuted.TLabel",
+            wraplength=960,
+            justify=tk.LEFT,
         )
         self.dash_recommendation.pack(anchor=tk.W, pady=(8, 0))
 
-        # Grade de Ações Rápidas (4 Cards)
-        actions_frame = ttk.LabelFrame(f, text="Ações Rápidas de Diagnóstico & Recuperação", padding=10)
-        actions_frame.pack(fill=tk.X, pady=(0, 10))
+        # Grade de Ações Rápidas (4 Cards Modernos com barra superior de destaque)
+        actions_grid = ttk.Frame(f, style="Root.TFrame")
+        actions_grid.pack(fill=tk.X, pady=(0, 10))
 
         for col in range(4):
-            actions_frame.columnconfigure(col, weight=1)
+            actions_grid.columnconfigure(col, weight=1)
 
-        def make_action_card(parent, title, desc, icon, c, target_view):
-            card = ttk.Frame(parent, padding=8, relief="ridge")
-            card.grid(row=0, column=c, padx=5, sticky="nsew")
+        def make_action_card(parent, title, desc, icon, c, target_view, accent_hex):
+            outer, card = self._make_card(
+                parent,
+                padding=(14, 12),
+                alt=True,
+                accent_top=accent_hex,
+            )
+            pad_l = 0 if c == 0 else 5
+            pad_r = 0 if c == 3 else 5
+            outer.grid(row=0, column=c, padx=(pad_l, pad_r), sticky="nsew")
 
-            ttk.Label(card, text=f"{icon}  {title}", font=("Segoe UI", 10, "bold")).pack(anchor=tk.W)
-            ttk.Label(card, text=desc, font=("Segoe UI", 8), wraplength=200, foreground="#94a3b8").pack(anchor=tk.W, pady=(3, 8))
+            ttk.Label(
+                card,
+                text=f"{icon}  {title}",
+                style="AltTitle.TLabel",
+            ).pack(anchor=tk.W)
 
-            btn = ttk.Button(card, text="Abrir Módulo", command=lambda: self._switch_view(target_view))
+            ttk.Label(
+                card,
+                text=desc,
+                style="AltMuted.TLabel",
+                wraplength=210,
+            ).pack(anchor=tk.W, pady=(4, 10))
+
+            btn = ttk.Button(
+                card,
+                text="Abrir Módulo →",
+                command=lambda: self._switch_view(target_view),
+            )
             btn.pack(anchor=tk.W)
 
         make_action_card(
-            actions_frame,
+            actions_grid,
             "Clonagem Segura",
             "Crie imagem .img saltando setores defeituosos sem estressar a mídia.",
-            "💾", 0, "clone"
+            "💾", 0, "clone", "#0EA5E9"
         )
         make_action_card(
-            actions_frame,
+            actions_grid,
             "Análise Partições",
             "Investigue GPT, MBR e recupere boot sectors NTFS desalinhados.",
-            "🔍", 1, "diagnostic"
+            "🔍", 1, "diagnostic", "#8B5CF6"
         )
         make_action_card(
-            actions_frame,
+            actions_grid,
             "Resgate de Arquivos",
             "Extraia fotos, PDFs e ZIPs diretamente dos setores brutos.",
-            "🔬", 2, "carver"
+            "🔬", 2, "carver", "#10B981"
         )
         make_action_card(
-            actions_frame,
+            actions_grid,
             "Teste Latência",
             "Mapeie blocos lentos com heatmap estilo MHDD/Victoria.",
-            "⚡", 3, "surface"
+            "⚡", 3, "surface", "#F59E0B"
         )
 
         # Tabela Resumo das Partições do Disco
-        part_box = ttk.LabelFrame(f, text="Partições e Volumes Detectados na Mídia", padding=8)
-        part_box.pack(fill=tk.BOTH, expand=True)
+        part_outer, part_box = self._make_card(
+            f,
+            title="PARTIÇÕES E VOLUMES DETECTADOS NA MÍDIA",
+            badge_text="GPT / MBR",
+            padding=(12, 10),
+        )
+        part_outer.pack(fill=tk.BOTH, expand=True)
 
         cols = ("idx", "name", "start_lba", "end_lba", "size", "fs", "status")
         self.dash_tree = ttk.Treeview(part_box, columns=cols, show="headings", height=6)
@@ -507,14 +881,14 @@ class DiskRescueApp:
         self.dash_tree.heading("start_lba", text="LBA Inicial")
         self.dash_tree.heading("end_lba", text="LBA Final")
         self.dash_tree.heading("size", text="Capacidade")
-        self.dash_tree.heading("fs", text="Sistema")
+        self.dash_tree.heading("fs", text="Tabela")
         self.dash_tree.heading("status", text="Condição")
 
-        self.dash_tree.column("idx", width=36, anchor=tk.CENTER)
-        self.dash_tree.column("name", width=160, anchor=tk.W)
+        self.dash_tree.column("idx", width=40, anchor=tk.CENTER)
+        self.dash_tree.column("name", width=180, anchor=tk.W)
         self.dash_tree.column("start_lba", width=120, anchor=tk.E)
         self.dash_tree.column("end_lba", width=120, anchor=tk.E)
-        self.dash_tree.column("size", width=100, anchor=tk.E)
+        self.dash_tree.column("size", width=110, anchor=tk.E)
         self.dash_tree.column("fs", width=80, anchor=tk.CENTER)
         self.dash_tree.column("status", width=180, anchor=tk.W)
 
@@ -528,80 +902,92 @@ class DiskRescueApp:
     # ══════════════════════════════════════════════════════════════════════════
     def _setup_view_diagnostic(self):
         f = self.view_diagnostic
+        p = self.palette
 
-        action_bar = ttk.Frame(f)
-        action_bar.pack(fill=tk.X, pady=(0, 8))
+        action_bar = ttk.Frame(f, style="Root.TFrame")
+        action_bar.pack(fill=tk.X, pady=(0, 10))
 
         self.lbl_target_info = ttk.Label(
             action_bar,
             text="Nenhum disco selecionado.",
-            font=("Segoe UI", 10, "italic")
+            style="ViewTitle.TLabel",
         )
-        self.lbl_target_info.pack(side=tk.LEFT, pady=4)
+        self.lbl_target_info.pack(side=tk.LEFT, pady=2)
 
         self.btn_run_scan = ttk.Button(
             action_bar,
             text="🚀 Iniciar Varredura de Geometria",
             style="Accent.TButton",
-            command=self._start_deep_scan
+            command=self._start_deep_scan,
         )
         self.btn_run_scan.pack(side=tk.RIGHT)
 
         # Container dos 2 cards comparativos
-        split_cards = ttk.Frame(f)
-        split_cards.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        split_cards = ttk.Frame(f, style="Root.TFrame")
+        split_cards.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
         split_cards.columnconfigure(0, weight=1)
         split_cards.columnconfigure(1, weight=1)
         split_cards.rowconfigure(0, weight=1)
 
         # Card 1: Tabela Oficial (GPT / MBR)
-        card_table = ttk.LabelFrame(split_cards, text="1. Tabela Registrada no Disco (GPT / MBR)", padding=8)
-        card_table.grid(row=0, column=0, padx=(0, 4), sticky="nsew")
+        card_table_outer, card_table = self._make_card(
+            split_cards,
+            title="1. TABELA REGISTRADA NO DISCO (GPT / MBR)",
+            badge_text="LBA 0..33",
+            padding=(12, 10),
+        )
+        card_table_outer.grid(row=0, column=0, padx=(0, 5), sticky="nsew")
 
-        self.txt_gpt = tk.Text(card_table, font=("Consolas", 9), wrap=tk.NONE)
-        gpt_s = ttk.Scrollbar(card_table, orient=tk.VERTICAL, command=self.txt_gpt.yview)
-        self.txt_gpt.configure(yscrollcommand=gpt_s.set)
-        self.txt_gpt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        gpt_s.pack(side=tk.RIGHT, fill=tk.Y)
+        gpt_wrap, self.txt_gpt = self._make_styled_text(card_table, wrap=tk.NONE)
+        gpt_wrap.pack(fill=tk.BOTH, expand=True)
 
         # Card 2: Assinaturas Reais na Mídia Física
-        card_media = ttk.LabelFrame(split_cards, text="2. Mídia Física Real (Boot Sectors & MFTs)", padding=8)
-        card_media.grid(row=0, column=1, padx=(4, 0), sticky="nsew")
+        card_media_outer, card_media = self._make_card(
+            split_cards,
+            title="2. MÍDIA FÍSICA REAL (BOOT SECTORS & MFTs)",
+            badge_text="RAW SCAN",
+            padding=(12, 10),
+        )
+        card_media_outer.grid(row=0, column=1, padx=(5, 0), sticky="nsew")
 
-        self.txt_fs = tk.Text(card_media, font=("Consolas", 9), wrap=tk.NONE)
-        fs_s = ttk.Scrollbar(card_media, orient=tk.VERTICAL, command=self.txt_fs.yview)
-        self.txt_fs.configure(yscrollcommand=fs_s.set)
-        self.txt_fs.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        fs_s.pack(side=tk.RIGHT, fill=tk.Y)
+        fs_wrap, self.txt_fs = self._make_styled_text(card_media, wrap=tk.NONE)
+        fs_wrap.pack(fill=tk.BOTH, expand=True)
 
         # Card 3: Ações de Resolução Cirúrgica
-        self.repair_card = ttk.LabelFrame(f, text="3. Ações Cirúrgicas de Resolução", padding=10)
-        self.repair_card.pack(fill=tk.X, side=tk.BOTTOM)
+        self.repair_card_outer, self.repair_card = self._make_card(
+            f,
+            title="3. AÇÕES CIRÚRGICAS DE RESOLUÇÃO COM ROLLBACK VERIFICADO",
+            badge_text="TRANSAÇÃO SEGURA",
+            padding=(14, 12),
+            accent_top=p["accent"],
+        )
+        self.repair_card_outer.pack(fill=tk.X, side=tk.BOTTOM)
 
         self.lbl_repair_diagnosis = ttk.Label(
             self.repair_card,
             text="Selecione um disco e execute a análise para verificar desalinhamentos ou boot sector corrompido.",
-            font=("Segoe UI", 9)
+            style="CardBody.TLabel",
+            wraplength=560,
         )
         self.lbl_repair_diagnosis.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        btn_box = ttk.Frame(self.repair_card)
+        btn_box = ttk.Frame(self.repair_card, style="Card.TFrame")
         btn_box.pack(side=tk.RIGHT)
 
         self.btn_repair_boot = ttk.Button(
             btn_box,
             text="🔄 Restaurar Boot Sector via Backup",
             state=tk.DISABLED,
-            command=self._execute_boot_restore
+            command=self._execute_boot_restore,
         )
-        self.btn_repair_boot.pack(side=tk.LEFT, padx=(0, 6))
+        self.btn_repair_boot.pack(side=tk.LEFT, padx=(0, 8))
 
         self.btn_repair = ttk.Button(
             btn_box,
             text="🛠️ Realinhar Partição GPT",
             style="Accent.TButton",
             state=tk.DISABLED,
-            command=self._execute_repair
+            command=self._execute_repair,
         )
         self.btn_repair.pack(side=tk.RIGHT)
 
@@ -610,70 +996,86 @@ class DiskRescueApp:
     # ══════════════════════════════════════════════════════════════════════════
     def _setup_view_smart(self):
         f = self.view_smart
+        p = self.palette
 
-        header = ttk.Frame(f)
-        header.pack(fill=tk.X, pady=(0, 8))
+        header = ttk.Frame(f, style="Root.TFrame")
+        header.pack(fill=tk.X, pady=(0, 10))
 
         ttk.Label(
             header,
             text="Telemetria S.M.A.R.T. de Hardware & Comunicação Elétrica",
-            font=("Segoe UI", 12, "bold")
+            style="ViewTitle.TLabel",
         ).pack(side=tk.LEFT)
 
         self.lbl_smart_source = ttk.Label(
             header,
             text="Interface: --",
-            font=("Segoe UI", 8),
-            foreground="#94a3b8"
+            font=("Segoe UI Semibold", 8, "bold"),
+            background=p["neutral_bg"],
+            foreground=p["neutral_fg"],
+            padding=(10, 4),
         )
         self.lbl_smart_source.pack(side=tk.RIGHT)
 
         # Grade de Métricas Principais (2 Linhas x 3 Colunas)
-        metrics_grid = ttk.Frame(f)
+        metrics_grid = ttk.Frame(f, style="Root.TFrame")
         metrics_grid.pack(fill=tk.X, pady=(0, 10))
 
         for c in range(3):
             metrics_grid.columnconfigure(c, weight=1)
 
-        def make_smart_metric(parent, label, default_val, c, r):
-            card = ttk.LabelFrame(parent, text=label, padding=10)
-            card.grid(column=c, row=r, padx=5, pady=4, sticky="nsew")
-            lbl = ttk.Label(card, text=default_val, font=("Segoe UI", 14, "bold"))
-            lbl.pack(anchor=tk.CENTER)
+        def make_smart_metric(parent, label, default_val, c, r, accent_hex):
+            outer, card = self._make_card(
+                parent,
+                padding=(14, 10),
+                alt=True,
+                accent_top=accent_hex,
+            )
+            pad_l = 0 if c == 0 else 5
+            pad_r = 0 if c == 2 else 5
+            outer.grid(column=c, row=r, padx=(pad_l, pad_r), pady=4, sticky="nsew")
+
+            ttk.Label(card, text=label, style="AltMuted.TLabel").pack(anchor=tk.W)
+            lbl = ttk.Label(card, text=default_val, style="AltMetric.TLabel")
+            lbl.pack(anchor=tk.W, pady=(4, 0))
             return lbl
 
-        self.val_temp = make_smart_metric(metrics_grid, "🌡️ Temperatura", "-- °C", 0, 0)
-        self.val_smart_risk = make_smart_metric(metrics_grid, "🛡️ Classificação de Risco", "--", 1, 0)
-        self.val_crc_err = make_smart_metric(metrics_grid, "🔌 Erros de Cabo SATA (CRC 0xC7)", "--", 2, 0)
+        self.val_temp = make_smart_metric(metrics_grid, "🌡️ Temperatura Operacional", "-- °C", 0, 0, "#0EA5E9")
+        self.val_smart_risk = make_smart_metric(metrics_grid, "🛡️ Classificação de Risco", "--", 1, 0, "#10B981")
+        self.val_crc_err = make_smart_metric(metrics_grid, "🔌 Erros de Cabo SATA (CRC 0xC7)", "--", 2, 0, "#8B5CF6")
 
-        self.val_reallocated = make_smart_metric(metrics_grid, "⚠️ Setores Remapeados (0x05)", "--", 0, 1)
-        self.val_pending = make_smart_metric(metrics_grid, "⏳ Setores Pendentes (0xC5)", "--", 1, 1)
-        self.val_spin = make_smart_metric(metrics_grid, "⚙️ Falhas de Partida Motor (0x0A)", "--", 2, 1)
+        self.val_reallocated = make_smart_metric(metrics_grid, "⚠️ Setores Remapeados (0x05)", "--", 0, 1, "#F59E0B")
+        self.val_pending = make_smart_metric(metrics_grid, "⏳ Setores Pendentes (0xC5)", "--", 1, 1, "#EF4444")
+        self.val_spin = make_smart_metric(metrics_grid, "⚙️ Falhas de Partida Motor (0x0A)", "--", 2, 1, "#EC4899")
 
         # Aviso sobre adaptadores USB e transparência técnica
-        advisory_box = ttk.Frame(f, padding=(8, 4))
-        advisory_box.pack(fill=tk.X, pady=(0, 6))
+        advisory_outer, advisory_box = self._make_card(f, padding=(12, 8))
+        advisory_outer.pack(fill=tk.X, pady=(0, 10))
 
         ttk.Label(
             advisory_box,
-            text="ℹ️ Nota Técnica: Controladoras USB genéricas frequentemente não repassam registros ATA brutos. "
-                 "Nesses cenários, os valores são honestamente apresentados como 'N/D' (Não Disponível), "
-                 "evitando falsos negativos de saúde.",
-            font=("Segoe UI", 8),
-            foreground="#94a3b8",
-            wraplength=950
+            text="ℹ️ Transparência Técnica: Pontes USB genéricas frequentemente bloqueiam registros ATA brutos. "
+                 "Quando os atributos numéricos não estão disponíveis, o sistema classifica honestamente como "
+                 "'Cinza (Indeterminado)' e exibe 'N/D', sem inventar saúde 'Verde'.",
+            style="CardMuted.TLabel",
+            wraplength=980,
         ).pack(anchor=tk.W)
 
         # Card de Diagnóstico do Firmware
-        self.smart_diag_box = ttk.LabelFrame(f, text="Análise Detalhada & Diretriz Recomendada", padding=12)
-        self.smart_diag_box.pack(fill=tk.BOTH, expand=True)
+        self.smart_diag_outer, self.smart_diag_box = self._make_card(
+            f,
+            title="LAUDO DE TELEMETRIA & DIRETRIZ OPERACIONAL",
+            badge_text="ATA / WMI",
+            padding=(16, 14),
+        )
+        self.smart_diag_outer.pack(fill=tk.BOTH, expand=True)
 
         self.lbl_smart_text = ttk.Label(
             self.smart_diag_box,
             text="Aguardando seleção do dispositivo para consultar telemetria...",
-            font=("Segoe UI", 9),
+            style="CardBody.TLabel",
             justify=tk.LEFT,
-            wraplength=950
+            wraplength=980,
         )
         self.lbl_smart_text.pack(anchor=tk.NW, fill=tk.BOTH, expand=True)
 
@@ -682,84 +1084,101 @@ class DiskRescueApp:
     # ══════════════════════════════════════════════════════════════════════════
     def _setup_view_clone(self):
         f = self.view_clone
+        p = self.palette
 
         ttk.Label(
             f,
             text="Clonagem Resiliente Não-Destrutiva em Duas Fases",
-            font=("Segoe UI", 12, "bold")
+            style="ViewTitle.TLabel",
         ).pack(anchor=tk.W, pady=(0, 2))
 
         ttk.Label(
             f,
             text="Inspirado no GNU ddrescue: na Fase 1, faz cópia rápida saltando blocos com erro de I/O para resgatar "
-                 "imediatamente os dados saudáveis. Na Fase 2, realiza leitura fina dos setores pendentes. "
-                 "Gera arquivo de mapa (.map) persistente para permitir pausar e retomar.",
-            font=("Segoe UI", 9),
-            foreground="#94a3b8",
-            wraplength=950
+                 "imediatamente os dados saudáveis. Na Fase 2, realiza leitura fina setor a setor com checkpoint atômico (.map).",
+            style="ViewSub.TLabel",
+            wraplength=980,
         ).pack(anchor=tk.W, pady=(0, 10))
 
         # Configuração de Destino
-        dest_card = ttk.LabelFrame(f, text="Arquivo de Imagem de Destino (.img)", padding=10)
-        dest_card.pack(fill=tk.X, pady=(0, 10))
+        dest_outer, dest_card = self._make_card(
+            f,
+            title="ARQUIVO DE IMAGEM DE DESTINO (.IMG)",
+            badge_text="PROTEÇÃO P0 ATIVA",
+            padding=(14, 12),
+        )
+        dest_outer.pack(fill=tk.X, pady=(0, 10))
 
-        row = ttk.Frame(dest_card)
+        row = ttk.Frame(dest_card, style="Card.TFrame")
         row.pack(fill=tk.X)
 
-        self.txt_dest_image = ttk.Entry(row)
-        self.txt_dest_image.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        self.txt_dest_image = ttk.Entry(row, font=("Segoe UI", 9))
+        self.txt_dest_image.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
 
-        ttk.Button(row, text="Procurar...", command=self._browse_image_dest).pack(side=tk.RIGHT)
+        ttk.Button(row, text="📂 Procurar...", command=self._browse_image_dest).pack(side=tk.RIGHT)
 
         ttk.Label(
             dest_card,
-            text="🛡️ Proteção de Segurança P0: O destino é rigorosamente verificado para garantir que não resida no mesmo disco físico de origem.",
-            font=("Segoe UI", 8),
-            foreground="#38bdf8"
-        ).pack(anchor=tk.W, pady=(4, 0))
+            text="🛡️ Barreira P0: Bloqueia automaticamente destinos no mesmo disco físico de origem e impede sobrescrita silenciosa de imagens sem mapa válido.",
+            style="CardMuted.TLabel",
+        ).pack(anchor=tk.W, pady=(8, 0))
 
         # Painel de Telemetria e Progresso
-        stats_frame = ttk.LabelFrame(f, text="Progresso da Clonagem & Resgate", padding=12)
-        stats_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-
-        self.clone_progressbar = ttk.Progressbar(stats_frame, mode="determinate")
-        self.clone_progressbar.pack(fill=tk.X, pady=(4, 10))
+        stats_outer, stats_frame = self._make_card(
+            f,
+            title="TELEMETRIA DE RESGATE & CHECKPOINT ATÔMICO",
+            badge_text="DDRESCUE ENGINE",
+            padding=(16, 14),
+            accent_top=p["accent"],
+        )
+        stats_outer.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
         self.lbl_clone_phase = ttk.Label(
             stats_frame,
             text="Fase: Aguardando início...",
-            font=("Segoe UI", 10, "bold")
+            style="CardTitle.TLabel",
         )
-        self.lbl_clone_phase.pack(anchor=tk.W, pady=2)
+        self.lbl_clone_phase.pack(anchor=tk.W, pady=(0, 6))
+
+        self.clone_progressbar = ttk.Progressbar(stats_frame, mode="determinate")
+        self.clone_progressbar.pack(fill=tk.X, pady=(0, 14))
 
         # Grade de estatísticas detalhadas
-        grid_stats = ttk.Frame(stats_frame)
-        grid_stats.pack(fill=tk.X, pady=(8, 0))
+        grid_stats = ttk.Frame(stats_frame, style="Card.TFrame")
+        grid_stats.pack(fill=tk.X, pady=(4, 0))
         for col in range(4):
             grid_stats.columnconfigure(col, weight=1)
 
-        def make_stat_box(parent, title, val, c):
-            box = ttk.Frame(parent, padding=6, relief="ridge")
-            box.grid(row=0, column=c, padx=4, sticky="nsew")
-            ttk.Label(box, text=title, font=("Segoe UI", 8), foreground="#94a3b8").pack(anchor=tk.W)
-            l = ttk.Label(box, text=val, font=("Segoe UI", 12, "bold"))
-            l.pack(anchor=tk.W)
+        def make_stat_box(parent, title, val, c, accent_hex):
+            outer, box = self._make_card(
+                parent,
+                padding=(12, 10),
+                alt=True,
+                accent_top=accent_hex,
+            )
+            pad_l = 0 if c == 0 else 5
+            pad_r = 0 if c == 3 else 5
+            outer.grid(row=0, column=c, padx=(pad_l, pad_r), sticky="nsew")
+
+            ttk.Label(box, text=title, style="AltMuted.TLabel").pack(anchor=tk.W)
+            l = ttk.Label(box, text=val, style="AltMetric.TLabel")
+            l.pack(anchor=tk.W, pady=(4, 0))
             return l
 
-        self.lbl_clone_pos = make_stat_box(grid_stats, "Setor Atual / Total", "0 / 0", 0)
-        self.lbl_clone_rescued = make_stat_box(grid_stats, "Setores Resgatados", "0", 1)
-        self.lbl_clone_bad = make_stat_box(grid_stats, "Bad Sectors Identificados", "0", 2)
-        self.lbl_clone_speed = make_stat_box(grid_stats, "Velocidade Média", "0.0 MB/s", 3)
+        self.lbl_clone_pos = make_stat_box(grid_stats, "Setor Atual / Total", "0 / 0", 0, "#0EA5E9")
+        self.lbl_clone_rescued = make_stat_box(grid_stats, "Setores Resgatados", "0", 1, "#10B981")
+        self.lbl_clone_bad = make_stat_box(grid_stats, "Bad Sectors Identificados", "0", 2, "#EF4444")
+        self.lbl_clone_speed = make_stat_box(grid_stats, "Taxa de Transferência", "0.0 MB/s", 3, "#8B5CF6")
 
         # Botões de Ação
-        ctrl_row = ttk.Frame(f)
+        ctrl_row = ttk.Frame(f, style="Root.TFrame")
         ctrl_row.pack(fill=tk.X, side=tk.BOTTOM)
 
         self.btn_cancel_clone = ttk.Button(
             ctrl_row,
-            text="⏸️ Interromper / Salvar Mapa",
+            text="⏸️ Interromper / Salvar Mapa (.map)",
             state=tk.DISABLED,
-            command=self._cancel_clone
+            command=self._cancel_clone,
         )
         self.btn_cancel_clone.pack(side=tk.LEFT)
 
@@ -767,7 +1186,7 @@ class DiskRescueApp:
             ctrl_row,
             text="🚀 Iniciar Clonagem Resiliente",
             style="Accent.TButton",
-            command=self._start_clone
+            command=self._start_clone,
         )
         self.btn_start_clone.pack(side=tk.RIGHT)
 
@@ -779,38 +1198,42 @@ class DiskRescueApp:
 
         ttk.Label(
             f,
-            text="Recuperação Forense de Arquivos (Assinaturas Mágicas / Magic Bytes)",
-            font=("Segoe UI", 12, "bold")
+            text="Recuperação Forense de Arquivos (Magic Bytes / Assinaturas Brutas)",
+            style="ViewTitle.TLabel",
         ).pack(anchor=tk.W, pady=(0, 2))
 
         ttk.Label(
             f,
             text="Localiza e extrai imagens (JPG, PNG), documentos (PDF) e arquivos compactados (ZIP, DOCX, XLSX) "
-                 "diretamente de setores brutos, mesmo se a partição tiver sido formatada ou perdida.",
-            font=("Segoe UI", 9),
-            foreground="#94a3b8",
-            wraplength=950
+                 "diretamente de setores brutos, mesmo quando o sistema de arquivos foi formatado ou corrompido.",
+            style="ViewSub.TLabel",
+            wraplength=980,
         ).pack(anchor=tk.W, pady=(0, 10))
 
         # Opções e Destino
-        cfg_box = ttk.LabelFrame(f, text="Configurações de Extração", padding=10)
-        cfg_box.pack(fill=tk.X, pady=(0, 8))
+        cfg_outer, cfg_box = self._make_card(
+            f,
+            title="CONFIGURAÇÕES DE EXTRAÇÃO & DIRETÓRIO DE SAÍDA",
+            badge_text="RAW STREAM",
+            padding=(14, 12),
+        )
+        cfg_outer.pack(fill=tk.X, pady=(0, 10))
 
-        row1 = ttk.Frame(cfg_box)
-        row1.pack(fill=tk.X, pady=(0, 6))
+        row1 = ttk.Frame(cfg_box, style="Card.TFrame")
+        row1.pack(fill=tk.X, pady=(0, 8))
 
-        ttk.Label(row1, text="Salvar Arquivos em:", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=(0, 8))
-        self.txt_carve_dir = ttk.Entry(row1)
-        self.txt_carve_dir.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        ttk.Label(row1, text="Salvar Arquivos em:", style="CardBody.TLabel").pack(side=tk.LEFT, padx=(0, 10))
+        self.txt_carve_dir = ttk.Entry(row1, font=("Segoe UI", 9))
+        self.txt_carve_dir.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
         default_dir = Path.home() / "Desktop" / "DiskRescue_Recuperados"
         self.txt_carve_dir.insert(0, str(default_dir))
-        ttk.Button(row1, text="Escolher Pasta...", command=self._browse_carve_dir).pack(side=tk.RIGHT)
+        ttk.Button(row1, text="📂 Escolher Pasta...", command=self._browse_carve_dir).pack(side=tk.RIGHT)
 
         # Filtros por Tipo de Arquivo
-        filter_row = ttk.Frame(cfg_box)
+        filter_row = ttk.Frame(cfg_box, style="Card.TFrame")
         filter_row.pack(fill=tk.X)
 
-        ttk.Label(filter_row, text="Tipos a Extrair:", font=("Segoe UI", 8, "bold"), foreground="#94a3b8").pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Label(filter_row, text="Assinaturas Ativas:", style="CardMuted.TLabel").pack(side=tk.LEFT, padx=(0, 12))
 
         self.chk_jpg_var = tk.BooleanVar(value=True)
         self.chk_png_var = tk.BooleanVar(value=True)
@@ -823,26 +1246,30 @@ class DiskRescueApp:
         ttk.Checkbutton(filter_row, text="Compactados ZIP/Office (.zip)", variable=self.chk_zip_var).pack(side=tk.LEFT, padx=6)
 
         # Lista de Arquivos Resgatados
-        list_box = ttk.LabelFrame(f, text="Arquivos Resgatados em Tempo Real", padding=8)
-        list_box.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        list_outer, list_box = self._make_card(
+            f,
+            title="ARQUIVOS RESGATADOS EM TEMPO REAL",
+            padding=(12, 10),
+        )
+        list_outer.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
         self.carver_tree = ttk.Treeview(
             list_box,
             columns=("id", "type", "lba", "size", "path"),
             show="headings",
-            height=9
+            height=8,
         )
         self.carver_tree.heading("id", text="#")
-        self.carver_tree.heading("type", text="Tipo")
+        self.carver_tree.heading("type", text="Formato")
         self.carver_tree.heading("lba", text="Setor LBA")
         self.carver_tree.heading("size", text="Tamanho")
-        self.carver_tree.heading("path", text="Arquivo Salvo no Destino")
+        self.carver_tree.heading("path", text="Caminho do Arquivo Salvo")
 
-        self.carver_tree.column("id", width=42, anchor=tk.CENTER)
-        self.carver_tree.column("type", width=80, anchor=tk.CENTER)
-        self.carver_tree.column("lba", width=110, anchor=tk.E)
-        self.carver_tree.column("size", width=100, anchor=tk.E)
-        self.carver_tree.column("path", width=480, anchor=tk.W)
+        self.carver_tree.column("id", width=46, anchor=tk.CENTER)
+        self.carver_tree.column("type", width=90, anchor=tk.CENTER)
+        self.carver_tree.column("lba", width=120, anchor=tk.E)
+        self.carver_tree.column("size", width=110, anchor=tk.E)
+        self.carver_tree.column("path", width=500, anchor=tk.W)
 
         c_scroll = ttk.Scrollbar(list_box, orient=tk.VERTICAL, command=self.carver_tree.yview)
         self.carver_tree.configure(yscrollcommand=c_scroll.set)
@@ -850,19 +1277,19 @@ class DiskRescueApp:
         c_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         # Rodapé de Ações
-        carve_actions = ttk.Frame(f)
+        carve_actions = ttk.Frame(f, style="Root.TFrame")
         carve_actions.pack(fill=tk.X, side=tk.BOTTOM)
 
-        self.lbl_carve_status = ttk.Label(carve_actions, text="Pronto para iniciar File Carving.", font=("Segoe UI", 9))
+        self.lbl_carve_status = ttk.Label(carve_actions, text="Pronto para iniciar File Carving.", style="ViewSub.TLabel")
         self.lbl_carve_status.pack(side=tk.LEFT)
 
-        ttk.Button(carve_actions, text="📂 Abrir Pasta dos Recuperados", command=self._open_carve_folder).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Button(carve_actions, text="📂 Abrir Pasta dos Recuperados", command=self._open_carve_folder).pack(side=tk.LEFT, padx=(14, 0))
 
         self.btn_start_carve = ttk.Button(
             carve_actions,
             text="🔍 Iniciar Carving Forense",
             style="Accent.TButton",
-            command=self._start_carver
+            command=self._start_carver,
         )
         self.btn_start_carve.pack(side=tk.RIGHT)
 
@@ -870,48 +1297,59 @@ class DiskRescueApp:
             carve_actions,
             text="⏸️ Interromper Carving",
             state=tk.DISABLED,
-            command=self._cancel_carver
+            command=self._cancel_carver,
         )
-        self.btn_cancel_carve.pack(side=tk.RIGHT, padx=(0, 6))
+        self.btn_cancel_carve.pack(side=tk.RIGHT, padx=(0, 8))
 
     # ══════════════════════════════════════════════════════════════════════════
     # TELA 6: VARREDURA DE SUPERFÍCIE (HEATMAP DE LATÊNCIA)
     # ══════════════════════════════════════════════════════════════════════════
     def _setup_view_surface(self):
         f = self.view_surface
+        p = self.palette
 
         ttk.Label(
             f,
             text="Varredura de Superfície & Heatmap de Latência de Setor",
-            font=("Segoe UI", 12, "bold")
+            style="ViewTitle.TLabel",
         ).pack(anchor=tk.W, pady=(0, 2))
 
         ttk.Label(
             f,
-            text="Mede o tempo de resposta do disco bloco a bloco (estilo Victoria / MHDD) para identificar setores degradados "
+            text="Mede o tempo de resposta físico bloco a bloco (estilo Victoria / MHDD) para identificar setores degradados "
                  "antes que ocorra perda definitiva de dados.",
-            font=("Segoe UI", 9),
-            foreground="#94a3b8"
-        ).pack(anchor=tk.W, pady=(0, 8))
+            style="ViewSub.TLabel",
+        ).pack(anchor=tk.W, pady=(0, 10))
 
         # Canvas do Heatmap (Grid de blocos coloridos)
-        canvas_box = ttk.LabelFrame(f, text="Grade de Blocos em Tempo Real", padding=6)
-        canvas_box.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        canvas_outer, canvas_box = self._make_card(
+            f,
+            title="MAPA DE CALOR DE LATÊNCIA EM TEMPO REAL",
+            badge_text="I/O PROFILER",
+            padding=(12, 10),
+        )
+        canvas_outer.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
-        canvas_bg = "#121212" if self.current_theme == "dark" else "#f3f4f6"
-        self.surface_canvas = tk.Canvas(canvas_box, bg=canvas_bg, height=220, highlightthickness=0)
+        self.surface_canvas = tk.Canvas(
+            canvas_box,
+            bg=p["bg_input"],
+            height=220,
+            highlightthickness=1,
+            highlightbackground=p["border"],
+            bd=0,
+        )
         self.surface_canvas.pack(fill=tk.BOTH, expand=True)
 
-        # Legenda e Contadores em Linha
-        legend_frame = ttk.Frame(f)
-        legend_frame.pack(fill=tk.X, pady=(0, 8))
+        # Legenda e Contadores em Card
+        leg_outer, legend_frame = self._make_card(f, padding=(12, 8), alt=True)
+        leg_outer.pack(fill=tk.X, pady=(0, 10))
 
         def make_legend(parent, color, label):
-            f_item = ttk.Frame(parent)
-            f_item.pack(side=tk.LEFT, padx=8)
-            c = tk.Canvas(f_item, width=12, height=12, bg=color, highlightthickness=0)
-            c.pack(side=tk.LEFT, padx=(0, 4))
-            lbl = ttk.Label(f_item, text=label, font=("Segoe UI", 8))
+            f_item = ttk.Frame(parent, style="CardAlt.TFrame")
+            f_item.pack(side=tk.LEFT, padx=10)
+            c = tk.Canvas(f_item, width=13, height=13, bg=color, highlightthickness=0, bd=0)
+            c.pack(side=tk.LEFT, padx=(0, 6))
+            lbl = ttk.Label(f_item, text=label, style="AltTitle.TLabel")
             lbl.pack(side=tk.LEFT)
             return lbl
 
@@ -923,25 +1361,25 @@ class DiskRescueApp:
         self.leg_bad = make_legend(legend_frame, "#7f1d1d", "Bad Sector: 0")
 
         # Barra de Ações
-        surface_actions = ttk.Frame(f)
+        surface_actions = ttk.Frame(f, style="Root.TFrame")
         surface_actions.pack(fill=tk.X, side=tk.BOTTOM)
 
-        self.lbl_surface_status = ttk.Label(surface_actions, text="Pronto para testar superfície.", font=("Segoe UI", 9))
+        self.lbl_surface_status = ttk.Label(surface_actions, text="Pronto para testar superfície.", style="ViewSub.TLabel")
         self.lbl_surface_status.pack(side=tk.LEFT)
 
         self.btn_cancel_surface = ttk.Button(
             surface_actions,
             text="⏹️ Interromper",
             state=tk.DISABLED,
-            command=self._cancel_surface
+            command=self._cancel_surface,
         )
-        self.btn_cancel_surface.pack(side=tk.LEFT, padx=(12, 0))
+        self.btn_cancel_surface.pack(side=tk.LEFT, padx=(14, 0))
 
         self.btn_start_surface = ttk.Button(
             surface_actions,
             text="⚡ Iniciar Teste de Superfície",
             style="Accent.TButton",
-            command=self._start_surface_scan
+            command=self._start_surface_scan,
         )
         self.btn_start_surface.pack(side=tk.RIGHT)
 
@@ -954,40 +1392,32 @@ class DiskRescueApp:
         ttk.Label(
             f,
             text="Console de Auditoria Forense & Registro de Eventos",
-            font=("Segoe UI", 12, "bold")
-        ).pack(anchor=tk.W, pady=(0, 6))
+            style="ViewTitle.TLabel",
+        ).pack(anchor=tk.W, pady=(0, 8))
 
-        c_bg = "#111827" if self.current_theme == "dark" else "#f9fafb"
-        c_fg = "#f3f4f6" if self.current_theme == "dark" else "#111827"
-
-        self.txt_console = tk.Text(
+        log_outer, log_box = self._make_card(
             f,
-            font=("Consolas", 9),
-            wrap=tk.WORD,
-            bg=c_bg,
-            fg=c_fg,
-            insertbackground="white",
-            relief="flat",
-            padx=10,
-            pady=8
+            title="HISTÓRICO DE OPERAÇÕES E DIAGNÓSTICOS DE BAIXO NÍVEL",
+            badge_text="AUDIT LOG",
+            padding=(12, 10),
         )
-        scroll = ttk.Scrollbar(f, orient=tk.VERTICAL, command=self.txt_console.yview)
-        self.txt_console.configure(yscrollcommand=scroll.set)
-        self.txt_console.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        log_outer.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
-        log_actions = ttk.Frame(f)
-        log_actions.pack(fill=tk.X, side=tk.BOTTOM, pady=(8, 0))
+        console_wrap, self.txt_console = self._make_styled_text(log_box, wrap=tk.WORD)
+        console_wrap.pack(fill=tk.BOTH, expand=True)
+
+        log_actions = ttk.Frame(f, style="Root.TFrame")
+        log_actions.pack(fill=tk.X, side=tk.BOTTOM)
 
         ttk.Button(log_actions, text="🧹 Limpar Log", command=lambda: self.txt_console.delete("1.0", tk.END)).pack(side=tk.LEFT)
-        ttk.Button(log_actions, text="💾 Exportar Relatório (.txt)", command=self._save_log_file).pack(side=tk.RIGHT)
+        ttk.Button(log_actions, text="💾 Exportar Relatório (.txt)", style="Accent.TButton", command=self._save_log_file).pack(side=tk.RIGHT)
 
     # ── BARRA DE STATUS INFERIOR ──────────────────────────────────────────────
     def _build_status_bar(self):
-        self.status_bar = ttk.Frame(self.root, padding=(14, 6))
+        self.status_bar = ttk.Frame(self.root, style="Header.TFrame", padding=(18, 7))
         self.status_bar.pack(fill=tk.X, side=tk.BOTTOM)
 
-        self.lbl_status = ttk.Label(self.status_bar, text="Pronto.", font=("Segoe UI", 9))
+        self.lbl_status = ttk.Label(self.status_bar, text="Pronto.", style="Status.TLabel")
         self.lbl_status.pack(side=tk.LEFT)
 
         self.progress_bar = ttk.Progressbar(self.status_bar, mode="indeterminate", length=220)
@@ -1270,14 +1700,33 @@ class DiskRescueApp:
             sv_ttk.set_theme("light")
             self.current_theme = "light"
             self.btn_theme.config(text="☀️ Claro")
-            self.txt_console.config(bg="#f9fafb", fg="#111827", insertbackground="black")
-            self.surface_canvas.config(bg="#f3f4f6")
+            _apply_windows_dwm_theme(self.root, dark=False)
         else:
             sv_ttk.set_theme("dark")
             self.current_theme = "dark"
             self.btn_theme.config(text="🌙 Escuro")
-            self.txt_console.config(bg="#111827", fg="#f3f4f6", insertbackground="white")
-            self.surface_canvas.config(bg="#121212")
+            _apply_windows_dwm_theme(self.root, dark=True)
+
+        p = self.palette
+        self._configure_custom_styles()
+        self.root.configure(bg=p["bg_root"])
+
+        for w in self._themed_cards:
+            w.configure(bg=p["bg_card"], highlightbackground=p["border"])
+        for w in self._themed_card_alts:
+            w.configure(bg=p["bg_card_alt"], highlightbackground=p["border"])
+        for d in self._themed_dividers:
+            d.configure(bg=p["border"], highlightbackground=p["border"])
+        for t in self._themed_text_widgets:
+            t.configure(
+                bg=p["bg_input"],
+                fg=p["text_primary"],
+                insertbackground=p["accent"],
+                selectbackground=p["accent_soft_bg"],
+                selectforeground=p["text_primary"],
+            )
+        self.surface_canvas.configure(bg=p["bg_input"], highlightbackground=p["border"])
+        self._switch_view(self.active_view)
 
     def _on_elevate(self):
         if relaunch_as_admin():
@@ -1325,13 +1774,13 @@ class DiskRescueApp:
 
         # Atualiza Card Superior do Dispositivo
         raw_text = "✔ Acesso Raw Liberado" if d.can_open_raw else "✖ Acesso Raw Bloqueado"
-        raw_bg = "#14532d" if d.can_open_raw else "#7f1d1d"
-        raw_fg = "#4ade80" if d.can_open_raw else "#fca5a5"
+        raw_bg = "#064E3B" if d.can_open_raw else "#7F1D1D"
+        raw_fg = "#34D399" if d.can_open_raw else "#FCA5A5"
 
         self.lbl_drive_raw_badge.config(text=raw_text, background=raw_bg, foreground=raw_fg)
         self.lbl_drive_details.config(
-            text=f"Caminho: {d.device_path}  |  Capacidade: {d.size_gb:.1f} GB ({d.size_bytes:,} bytes)  |  "
-                 f"Mídia: {d.media_type}  |  Barramento: {d.bus_type}  |  Serial: {d.serial_number or 'N/A'}"
+            text=f"Caminho: {d.device_path}  •  Capacidade: {d.size_gb:.1f} GB ({d.size_bytes:,} bytes)  •  "
+                 f"Mídia: {d.media_type}  •  Barramento: {d.bus_type}  •  Serial: {d.serial_number or 'N/A'}"
         )
 
         # Atualiza Mini Card da Sidebar
@@ -1342,7 +1791,6 @@ class DiskRescueApp:
         # Atualiza Header da Aba de Diagnóstico
         self.lbl_target_info.config(
             text=f"Disco Alvo: [Disco {d.number}] {d.friendly_name} ({d.size_gb:.1f} GB)",
-            font=("Segoe UI", 10, "bold")
         )
 
         # Atualiza Dashboard Inicial
@@ -1422,6 +1870,9 @@ class DiskRescueApp:
             ("usb" in hip_str) or
             ("usb" in (report.action_recommendation or "").lower())
         )
+
+        if target_disk:
+            self.lbl_smart_source.config(text=f"Interface: {target_disk.bus_type}")
 
         # Atualiza badge de saúde no Dashboard
         if risk_val == "Verde":
@@ -2003,13 +2454,14 @@ class DiskRescueApp:
         }
         color = colors.get(res.status, "#ef4444")
 
-        # Desenha quadradinho no Canvas com geometria responsiva
-        box_size = 11
-        gap = 2
+        # Desenha célula moderna no Canvas com geometria responsiva
+        box_size = 12
+        gap = 3
         stride = box_size + gap
-        cols = 54
-        x = (self.block_canvas_idx % cols) * stride + 12
-        y = (self.block_canvas_idx // cols) * stride + 12
+        canvas_w = max(self.surface_canvas.winfo_width(), 820)
+        cols = max(20, (canvas_w - 24) // stride)
+        x = (self.block_canvas_idx % cols) * stride + 14
+        y = (self.block_canvas_idx // cols) * stride + 14
 
         self.surface_canvas.create_rectangle(x, y, x + box_size, y + box_size, fill=color, outline="")
         self.block_canvas_idx += 1
@@ -2044,6 +2496,7 @@ class DiskRescueApp:
 
 
 def run_gui():
+    _enable_high_dpi()
     root = tk.Tk()
     app = DiskRescueApp(root)
     root.mainloop()

@@ -10,7 +10,7 @@ if __name__ == "__main__":
         print("[SMOKE TEST] Iniciando verificação de integridade do DiskRescue v0.3.3...")
         import tkinter as tk
         from pathlib import Path
-        from gui.app import DiskRescueApp, AQUI
+        from gui.app import DiskRescueApp, AQUI, _enable_high_dpi
         import core.filesystem.ntfs_boot_repair  # noqa: F401
         import core.filesystem.scanner           # noqa: F401
         import core.hardware.device_resolver     # noqa: F401
@@ -27,6 +27,7 @@ if __name__ == "__main__":
             asset_path = Path(AQUI) / "gui" / "assets" / asset_name
             assert asset_path.is_file(), f"Asset obrigatório ausente: {asset_path}"
 
+        _enable_high_dpi()
         root = tk.Tk()
         root.withdraw()
         app = DiskRescueApp(root, auto_refresh=False)
