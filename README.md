@@ -19,10 +19,10 @@ A aplicação conta com uma interface desktop moderna no padrão **Windows 11 Fl
 Baixe a versão mais recente pronta para uso:
 👉 **[Baixar DiskRescue v0.2.1 (Executável Portátil)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)**
 
-* **Portátil e Autônomo:** Não requer instalação de Python nem dependências externas.
+* **Portátil e Autônomo:** Não requer instalação de Python nem dependências externas (~11.6 MB).
 * **Integridade Criptográfica (SHA-256):**
   ```text
-  (Calculado a cada compilação de release)
+  ABB5A4DFF092F01FB50A76A1F3DDCB394FB52C6682A3F8773A66AC61373CACC6
   ```
 * **Elevação UAC Automática:** Manifest embutido solicita privilégios de Administrador ao iniciar, garantindo acesso direto de baixo nível (`\\.\PhysicalDriveX`).
 
