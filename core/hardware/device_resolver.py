@@ -69,7 +69,8 @@ def get_physical_drive_number(target: str | Path) -> Optional[int]:
             resolved = Path(target_str).resolve()
             drive = resolved.drive
             if drive:
-                volume_to_query = rf"\\.\{drive.rstrip('\\')}"
+                clean_drive = drive.rstrip("\\")
+                volume_to_query = rf"\\.\{clean_drive}"
         except Exception:
             pass
 

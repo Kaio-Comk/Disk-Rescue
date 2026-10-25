@@ -22,7 +22,7 @@ Baixe a versão mais recente pronta para uso:
 * **Portátil e Autônomo:** Não requer instalação de Python nem dependências externas (~11.6 MB).
 * **Integridade Criptográfica (SHA-256):**
   ```text
-  ABB5A4DFF092F01FB50A76A1F3DDCB394FB52C6682A3F8773A66AC61373CACC6
+  CB5C846C69CD5FBDDD838F72BFCB62A59462F41BF2FF4AF072C7156DF26DD087
   ```
 * **Elevação UAC Automática:** Manifest embutido solicita privilégios de Administrador ao iniciar, garantindo acesso direto de baixo nível (`\\.\PhysicalDriveX`).
 
