@@ -44,7 +44,8 @@ class FileCarver:
         self,
         device_path: Union[str, Path, BinaryIO],
         output_dir: Path,
-        discard_invalid: bool = False
+        discard_invalid: bool = False,
+        source_identifier: Optional[str] = None
     ):
         self.device = device_path
         self.output_dir = Path(output_dir)
@@ -53,9 +54,25 @@ class FileCarver:
         self.corrupted_files: List[CarvedFile] = []
         self.cancel_requested = False
 
-        # Validação de segurança P0: Impedir salvar no próprio disco ou partição sob análise
+        # Validação de segurança P0: Identificar a origem e impedir salvar no próprio disco sob análise
+        resolved_source_id = None
         if isinstance(device_path, (str, Path)):
-            assert_safe_source_and_destination(str(device_path), self.output_dir, is_directory=True)
+            resolved_source_id = str(device_path)
+        elif source_identifier:
+            resolved_source_id = str(source_identifier)
+        elif hasattr(device_path, "name") and isinstance(device_path.name, (str, bytes)):
+            resolved_source_id = str(device_path.name)
+
+        if resolved_source_id:
+            assert_safe_source_and_destination(resolved_source_id, self.output_dir, is_directory=True)
+        else:
+            # Fluxos binários de teste mock são permitidos (ex: BytesIO ou StrictReadOnlyDeviceStream)
+            type_name = type(device_path).__name__
+            if type_name not in ("BytesIO", "StrictReadOnlyDeviceStream"):
+                raise ValueError(
+                    "BLOQUEIO FAIL-CLOSED: O FileCarver recebeu um fluxo binário sem identificador de origem comprovável "
+                    "(source_identifier). Para prevenir gravação acidental no disco de origem, informe o caminho do dispositivo."
+                )
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -66,7 +83,7 @@ class FileCarver:
 
     @staticmethod
     def verify_file_integrity(file_path: Path, kind: str) -> bool:
-        """Valida a integridade estrutural após a extração sem carregar o arquivo inteiro na memória."""
+        """Validação profunda e estrutural pós-extração (chunks/CRCs para PNG, segmentos para JPEG, tabelas para PDF, CRC para ZIP)."""
         try:
             if not file_path.exists():
                 return False
@@ -80,35 +97,85 @@ class FileCarver:
                     return zf.testzip() is None
 
             elif kind == "PNG":
-                if size < 32:
+                if size < 33:
                     return False
+                import zlib
                 with open(file_path, "rb") as f:
-                    header = f.read(16)
-                    if len(header) < 16 or not header.startswith(b"\x89PNG\r\n\x1a\n"):
+                    header = f.read(8)
+                    if header != b"\x89PNG\r\n\x1a\n":
                         return False
-                    # Valida que o primeiro chunk é IHDR (bytes 12..16)
-                    if header[12:16] != b"IHDR":
-                        return False
-                    # Valida a presença de IEND nos últimos 64 bytes
-                    tail_len = min(64, size)
-                    f.seek(size - tail_len)
-                    tail = f.read(tail_len)
-                    return b"IEND" in tail
+                    has_ihdr = False
+                    has_iend = False
+                    while True:
+                        len_b = f.read(4)
+                        if not len_b or len(len_b) < 4:
+                            break
+                        c_len = struct.unpack(">I", len_b)[0]
+                        c_type = f.read(4)
+                        if len(c_type) < 4:
+                            return False
+                        if not has_ihdr:
+                            if c_type != b"IHDR" or c_len != 13:
+                                return False
+                            has_ihdr = True
+                        c_data = f.read(c_len)
+                        if len(c_data) < c_len:
+                            return False
+                        crc_b = f.read(4)
+                        if len(crc_b) < 4:
+                            return False
+                        exp_crc = struct.unpack(">I", crc_b)[0]
+                        calc_crc = zlib.crc32(c_type + c_data) & 0xffffffff
+                        if calc_crc != exp_crc:
+                            return False
+                        if c_type == b"IEND":
+                            has_iend = True
+                            break
+                    return has_ihdr and has_iend
 
             elif kind == "JPEG":
                 if size < 4:
                     return False
                 with open(file_path, "rb") as f:
-                    header = f.read(4)
-                    if len(header) < 4 or not header.startswith(b"\xff\xd8\xff"):
+                    header = f.read(2)
+                    if header != b"\xff\xd8":
                         return False
-                    # O 4º byte deve ser um marcador válido (0xe0=JFIF, 0xe1=Exif, 0xdb=DQT, 0xc0=SOF, etc.)
-                    marker = header[3]
-                    if not (0xc0 <= marker <= 0xfe):
-                        return False
-                    f.seek(size - 2)
-                    tail = f.read(2)
-                    return tail == b"\xff\xd9"
+                    has_valid_marker = False
+                    while True:
+                        b = f.read(1)
+                        if not b:
+                            break
+                        if b != b"\xff":
+                            continue
+                        while b == b"\xff":
+                            b = f.read(1)
+                        if not b:
+                            break
+                        m = b[0]
+                        if m == 0xd9:  # EOI
+                            break
+                        if m in (0xd8, 0x01) or (0xd0 <= m <= 0xd7):
+                            continue
+                        len_b = f.read(2)
+                        if len(len_b) < 2:
+                            return False
+                        seg_l = struct.unpack(">H", len_b)[0]
+                        if seg_l < 2:
+                            return False
+                        has_valid_marker = True
+                        if m in (0xc0, 0xc2):
+                            sof_d = f.read(seg_l - 2)
+                            if len(sof_d) >= 5:
+                                h, w = struct.unpack(">HH", sof_d[1:5])
+                                if h == 0 or w == 0:
+                                    return False
+                            continue
+                        if m == 0xda:  # SOS
+                            break
+                        f.seek(seg_l - 2, os.SEEK_CUR)
+
+                    f.seek(-2, os.SEEK_END)
+                    return has_valid_marker and f.read(2) == b"\xff\xd9"
 
             elif kind == "PDF":
                 if size < 32:
@@ -122,7 +189,22 @@ class FileCarver:
                     tail = f.read(tail_len)
                     if b"%%EOF" not in tail:
                         return False
-                    return b"xref" in tail or b"startxref" in tail or b"trailer" in tail or b"/Root" in tail
+                    if b"startxref" not in tail:
+                        return b"xref" in tail or b"trailer" in tail
+                    idx = tail.rfind(b"startxref")
+                    after_sx = tail[idx + 9:].strip()
+                    tokens = after_sx.split()
+                    if not tokens:
+                        return False
+                    try:
+                        x_off = int(tokens[0])
+                    except ValueError:
+                        return False
+                    if x_off < 0 or x_off >= size:
+                        return False
+                    f.seek(x_off)
+                    lead = f.read(32)
+                    return b"xref" in lead or b"/XRef" in lead or b"obj" in lead or b"trailer" in lead
 
             return True
         except Exception:
@@ -149,6 +231,10 @@ class FileCarver:
         """
         temp_name = f"recovered_{file_counter:04d}{ext}"
         candidate_path = self.output_dir / temp_name
+        collision_counter = 1
+        while candidate_path.exists():
+            candidate_path = self.output_dir / f"recovered_{file_counter:04d}_{collision_counter}{ext}"
+            collision_counter += 1
 
         stream.seek(start_offset)
         chunk_size = 64 * 1024  # 64 KB por lote
@@ -237,11 +323,13 @@ class FileCarver:
                 log.info("Descartado arquivo inválido/corrompido no LBA %d (%s, %d bytes)", file_lba, kind, file_len)
                 return None
             else:
-                # Renomeia com sufixo _corrupted para não enganar o usuário
+                # Renomeia com sufixo _corrupted para não enganar o usuário sem sobrescrever existentes
                 corrupted_name = f"recovered_{file_counter:04d}_corrupted{ext}"
                 corrupted_path = self.output_dir / corrupted_name
-                candidate_path.replace(corrupted_path)
-                candidate_path = corrupted_path
+                collision_counter = 1
+                while corrupted_path.exists():
+                    corrupted_path = self.output_dir / f"recovered_{file_counter:04d}_{collision_counter}_corrupted{ext}"
+                    collision_counter += 1
                 candidate_path.replace(corrupted_path)
                 candidate_path = corrupted_path
 
@@ -271,6 +359,10 @@ class FileCarver:
         progress_cb: Optional[Callable[[int, int, int], None]] = None  # (cur_lba, total_lba, valid_count)
     ) -> List[CarvedFile]:
         """Varre o dispositivo físico setor a setor extraindo arquivos íntegros com suporte a multi-bloco."""
+        if chunk_sectors <= 0 or chunk_sectors > 65536:
+            raise ValueError(
+                f"chunk_sectors deve ser estritamente positivo e razoável (1..65536 setores). Recebido: {chunk_sectors}"
+            )
         chunk_bytes = chunk_sectors * SECTOR_SIZE
         current_lba = 0
         file_counter = 0

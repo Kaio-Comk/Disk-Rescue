@@ -1,6 +1,8 @@
 """
-core/hardware/write_blocker.py — Camada de abstração de I/O e Write-Blocker formal.
-Garante que ferramentas de diagnóstico, varredura e triagem nunca gravem um único byte na mídia de origem.
+core/hardware/write_blocker.py — Software Write-Guard (camada de proteção e auditoria de software "Do No Harm").
+Intercepta e bloqueia tentativas indevidas de escrita no nível da aplicação e do fluxo de I/O em modo somente-leitura.
+NOTA FORENSE: Este componente atua como um Write-Guard estrito em nível de software/processo. Ele não substitui
+um bloqueador físico de hardware dedicado (como Tableau ou WiebeTech) em procedimentos de custódia pericial.
 """
 from __future__ import annotations
 
@@ -20,8 +22,9 @@ class WriteBlockViolationError(PermissionError):
 
 class StrictReadOnlyDeviceStream(io.RawIOBase):
     """
-    Dispositivo simulado de leitura que atua como bloqueador físico estrito (Hardware Write-Blocker).
-    Registra todas as leituras e intercepta/bloqueia sumariamente qualquer tentativa de escrita.
+    Camada instrumentada de leitura que atua como Software Write-Guard ("Do No Harm").
+    Garante que o stream seja estritamente somente-leitura, registrando todas as leituras
+    e interceptando sumariamente qualquer chamada de escrita (write, writelines, truncate).
     """
 
     def __init__(self, target: Union[bytes, bytearray, io.RawIOBase, io.BufferedIOBase, BinaryIO]):

@@ -94,3 +94,27 @@ def test_smart_read_errors_not_confused_with_pending_sectors():
     )
     assert report.pending_sectors == 0
     assert report.reallocated_sectors == 0
+
+
+def test_smart_windows_reliability_counters_remain_segregated_and_unknown():
+    """P2 Teste: Métricas do Windows não poluem raw_attributes e ausência de SMART mantém UNKNOWN."""
+    report = analyze_smart_data(
+        device_id=6,
+        device_path=r"\\.\PhysicalDrive6",
+        model="NVMe SSD",
+        serial="NVME001",
+        raw_attributes={},  # Nenhum registrador SMART ATA do fabricante
+        temperature_c=41,
+        windows_reliability={
+            "ReadErrorsTotal": 0,
+            "WriteErrorsTotal": 0,
+            "Wear": 5
+        }
+    )
+    # Deve permanecer UNKNOWN porque não há registros SMART de hardware
+    assert report.risk_level == SmartRiskLevel.UNKNOWN
+    # raw_attributes deve permanecer vazio (sem criar atributos falsos como ID 1 ou ID 197)
+    assert len(report.attributes) == 0
+    assert report.windows_reliability is not None
+    assert report.windows_reliability["Wear"] == 5
+    assert any("subsistema windows" in e.lower() for e in report.evidencia_observada)

@@ -92,8 +92,10 @@ def get_physical_drive_number(target: str | Path) -> Optional[int]:
         drive_letter = drive_match.group(1).upper()
         volume_to_query = rf"\\.\{drive_letter}:"
     elif target_str.startswith(r"\\.\Volume{") or target_str.startswith(r"\\?\Volume{"):
-        # Volume GUID
+        # Volume GUID normalizado para namespace de dispositivo Win32 (\\.\) sem barra final
         vol = target_str.rstrip("\\")
+        if vol.startswith("\\\\?\\"):
+            vol = r"\\." + vol[3:]
         volume_to_query = vol
     else:
         # Tenta resolver o caminho para encontrar a letra do drive
@@ -186,54 +188,41 @@ def is_same_physical_device(
     except Exception:
         pass
 
-    # 3. Resolução profunda de Discos Físicos (PhysicalDrive) com política FAIL-CLOSED
+    # 3. Resolução profunda de Discos Físicos (PhysicalDrive) com política FAIL-CLOSED universal
     # Isenta URIs simuladas de testes (ex: mock://) para manter determinismo da suíte sintética
     is_mock = src_str.startswith("mock://") or dst_str.startswith("mock://")
     src_is_physical = bool(re.search(r"PhysicalDrive\d+", src_str, re.IGNORECASE)) or (
-        src_str.startswith(r"\\.") and not is_mock
+        (src_str.startswith(r"\\.") or src_str.startswith("\\\\?\\") or "volume{" in src_str.lower())
+        and not is_mock
     )
     dst_is_physical = bool(re.search(r"PhysicalDrive\d+", dst_str, re.IGNORECASE)) or (
-        dst_str.startswith(r"\\.") and not is_mock
+        (dst_str.startswith(r"\\.") or dst_str.startswith("\\\\?\\") or "volume{" in dst_str.lower())
+        and not is_mock
     )
 
     if (src_is_physical or dst_is_physical) and not is_mock:
         src_drive_num = get_physical_drive_number(src_str)
         dst_drive_num = get_physical_drive_number(dst_str)
 
-        # Regra FAIL-CLOSED: Se a origem é um disco físico, o destino DEVE ter sua unidade física comprovada
-        if src_is_physical:
-            if src_drive_num is None:
-                return (
-                    True,
-                    f"BLOQUEIO FAIL-CLOSED: O identificador de origem '{src_str}' é um dispositivo físico, "
-                    f"mas não foi possível resolver com segurança seu número de PhysicalDrive. "
-                    f"Operação abortada para prevenir sobrescrita destrutiva.",
-                )
-            if dst_drive_num is None:
-                return (
-                    True,
-                    f"BLOQUEIO FAIL-CLOSED: A origem física foi identificada como PhysicalDrive{src_drive_num}, "
-                    f"mas não foi possível comprovar em qual disco físico o destino '{dst_str}' reside. "
-                    f"Para garantir a preservação da mídia, salve em um volume ou disco externo comprovadamente independente.",
-                )
-            if src_drive_num == dst_drive_num:
-                return (
-                    True,
-                    f"Origem e destino pertencem ao mesmo disco físico (PhysicalDrive{src_drive_num}). "
-                    f"Gravar dados no mesmo disco em recuperação causará sobrescrita catastrófica dos dados.",
-                )
-
-        elif dst_is_physical:
-            if dst_drive_num is None:
-                return (
-                    True,
-                    f"BLOQUEIO FAIL-CLOSED: O destino '{dst_str}' é um dispositivo físico não resolvido.",
-                )
-            if src_drive_num is not None and src_drive_num == dst_drive_num:
-                return (
-                    True,
-                    f"Origem e destino pertencem ao mesmo disco físico (PhysicalDrive{dst_drive_num}).",
-                )
+        # Regra FAIL-CLOSED universal: Se a origem OU o destino for dispositivo físico/volume bruto
+        if src_drive_num is None:
+            return (
+                True,
+                f"BLOQUEIO FAIL-CLOSED: Não foi possível resolver com certeza absoluta o disco físico "
+                f"da origem '{src_str}'. Operação abortada para prevenir sobrescrita destrutiva da mídia.",
+            )
+        if dst_drive_num is None:
+            return (
+                True,
+                f"BLOQUEIO FAIL-CLOSED: Não foi possível comprovar em qual disco físico o destino '{dst_str}' reside. "
+                f"Para garantir a preservação da mídia, aponte para um volume ou disco externo comprovadamente independente.",
+            )
+        if src_drive_num == dst_drive_num:
+            return (
+                True,
+                f"Origem e destino pertencem ao mesmo disco físico (PhysicalDrive{src_drive_num}). "
+                f"Gravar dados no mesmo disco em recuperação causará sobrescrita catastrófica dos dados.",
+            )
 
     return False, ""
 

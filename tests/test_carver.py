@@ -22,8 +22,10 @@ def test_carver_detects_and_extracts_files(tmp_path: Path):
     # 1. Monta um JPEG sintético no LBA 50
     jpeg_payload = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00" + (b"IMAGE_PIXELS_" * 20) + b"\xff\xd9"
     
-    # 2. Monta um PDF sintético no LBA 150
-    pdf_payload = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\nxref\ntrailer\n<< /Root 1 0 R >>\nstartxref\n99\n%%EOF"
+    # 2. Monta um PDF sintético no LBA 150 com startxref apontando exatamente para xref
+    pdf_body = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n"
+    xref_offset = len(pdf_body)
+    pdf_payload = pdf_body + b"xref\ntrailer\n<< /Root 1 0 R >>\nstartxref\n" + str(xref_offset).encode() + b"\n%%EOF"
 
     with open(disk_file, "r+b") as f:
         f.seek(50 * SECTOR_SIZE)
@@ -61,11 +63,13 @@ def test_carver_cross_block_large_file_over_1mb(tmp_path: Path):
     disk_file = tmp_path / "disk_large_file.img"
     total_sectors = 5000  # ~2.5 MB
 
-    # Constrói um PDF válido com 1.5 MiB de tamanho
+    # Constrói um PDF válido com 1.5 MiB de tamanho e startxref exato
     header = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n"
-    footer = b"\nxref\ntrailer\n<< /Root 1 0 R >>\nstartxref\n12345\n%%EOF"
-    padding_needed = (1500 * 1024) - len(header) - len(footer)
-    pdf_payload = header + (b"CONTENT_STREAM_CHUNK\n" * (padding_needed // 21)) + footer
+    padding_needed = (1500 * 1024) - len(header) - 80
+    body = header + (b"CONTENT_STREAM_CHUNK\n" * (padding_needed // 21))
+    xref_offset = len(body) + 1
+    footer = b"\nxref\ntrailer\n<< /Root 1 0 R >>\nstartxref\n" + str(xref_offset).encode() + b"\n%%EOF"
+    pdf_payload = body + footer
 
     assert len(pdf_payload) >= 1.4 * 1024 * 1024  # > 1.4 MB
 
@@ -187,7 +191,8 @@ def test_carver_handles_false_signatures_and_truncated_files(tmp_path: Path):
 
 
 def test_carver_extracts_png_with_ihdr_and_iend(tmp_path: Path):
-    """P1 Teste: Extração e validação estrutural completa de arquivo PNG com chunks IHDR e IEND."""
+    """P1 Teste: Extração e validação estrutural profunda de arquivo PNG com chunks reais e CRCs calculados."""
+    import zlib
     disk_file = tmp_path / "disk_with_png.img"
     total_sectors = 200
 
@@ -195,11 +200,18 @@ def test_carver_extracts_png_with_ihdr_and_iend(tmp_path: Path):
         f.seek(total_sectors * SECTOR_SIZE - 1)
         f.write(b"\x00")
 
-    # Monta um PNG válido no LBA 25
+    # Monta um PNG válido no LBA 25 com CRCs matematicamente autênticos
     header = b"\x89PNG\r\n\x1a\n"
-    ihdr_chunk = struct.pack(">I", 13) + b"IHDR" + (b"\x00" * 13) + (b"\x12\x34\x56\x78")
-    idat_chunk = struct.pack(">I", 64) + b"IDAT" + (b"COMPRESSED_IMAGE_PIXELS_" * 2)[:64] + (b"\x9a\xbc\xde\xf0")
-    iend_chunk = struct.pack(">I", 0) + b"IEND" + b"\xaeB`\x82"
+    ihdr_data = b"\x00\x00\x00\x20\x00\x00\x00\x20\x08\x02\x00\x00\x00"  # 32x32 pixels, 8-bit truecolor
+    ihdr_crc = struct.pack(">I", zlib.crc32(b"IHDR" + ihdr_data) & 0xffffffff)
+    ihdr_chunk = struct.pack(">I", 13) + b"IHDR" + ihdr_data + ihdr_crc
+
+    idat_data = (b"COMPRESSED_IMAGE_PIXELS_" * 2)[:64]
+    idat_crc = struct.pack(">I", zlib.crc32(b"IDAT" + idat_data) & 0xffffffff)
+    idat_chunk = struct.pack(">I", len(idat_data)) + b"IDAT" + idat_data + idat_crc
+
+    iend_crc = struct.pack(">I", zlib.crc32(b"IEND") & 0xffffffff)
+    iend_chunk = struct.pack(">I", 0) + b"IEND" + iend_crc
     png_payload = header + ihdr_chunk + idat_chunk + iend_chunk
 
     with open(disk_file, "r+b") as f:
@@ -217,3 +229,71 @@ def test_carver_extracts_png_with_ihdr_and_iend(tmp_path: Path):
     assert png_carved.size_bytes == len(png_payload)
     assert png_carved.is_structurally_valid is True
     assert png_carved.saved_path.read_bytes() == png_payload
+
+
+def test_carver_rejects_negative_or_zero_chunk_sectors(tmp_path: Path):
+    """P1 Teste: Garante rejeição estrita de chunk_sectors <= 0 ou excessivo."""
+    import pytest
+    disk_file = tmp_path / "dummy.img"
+    disk_file.write_bytes(b"\x00" * 2048)
+    carver = FileCarver(str(disk_file), tmp_path / "out")
+
+    with pytest.raises(ValueError, match="estritamente positivo"):
+        carver.scan(chunk_sectors=0)
+
+    with pytest.raises(ValueError, match="estritamente positivo"):
+        carver.scan(chunk_sectors=-10)
+
+    with pytest.raises(ValueError, match="razoável"):
+        carver.scan(chunk_sectors=100000)
+
+
+def test_carver_does_not_overwrite_existing_recovered_files(tmp_path: Path):
+    """P1 Teste: Garante que múltiplas varreduras na mesma pasta nunca sobrescrevam arquivos anteriores."""
+    disk_file = tmp_path / "disk.img"
+    total_sectors = 100
+
+    jpeg_payload = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00" + (b"IMG" * 10) + b"\xff\xd9"
+    with open(disk_file, "wb") as f:
+        f.seek(total_sectors * SECTOR_SIZE - 1)
+        f.write(b"\x00")
+    with open(disk_file, "r+b") as f:
+        f.seek(10 * SECTOR_SIZE)
+        f.write(jpeg_payload)
+
+    out_dir = tmp_path / "safe_output"
+    # Pré-cria um arquivo já existente recovered_0001.jpg
+    out_dir.mkdir(parents=True, exist_ok=True)
+    existing_file = out_dir / "recovered_0001.jpg"
+    existing_file.write_bytes(b"PREVIOUSLY_RECOVERED_IMPORTANT_DATA")
+
+    carver = FileCarver(str(disk_file), out_dir)
+    recovered = carver.scan(max_sectors=total_sectors, chunk_sectors=50)
+
+    assert len(recovered) == 1
+    # O arquivo pré-existente NÃO deve ter sido sobrescrito!
+    assert existing_file.read_bytes() == b"PREVIOUSLY_RECOVERED_IMPORTANT_DATA"
+    # O novo arquivo deve ter sido salvo com sufixo numérico sem colisão!
+    assert recovered[0].saved_path.name != "recovered_0001.jpg"
+    assert recovered[0].saved_path.exists()
+    assert recovered[0].saved_path.read_bytes() == jpeg_payload
+
+
+def test_carver_rejects_anonymous_unidentified_stream(tmp_path: Path):
+    """P0 Teste: Fluxo binário anônimo sem source_identifier comprovável é bloqueado por Fail-Closed."""
+    import pytest
+    raw_disk = tmp_path / "raw_source.img"
+    raw_disk.write_bytes(b"\x00" * 4096)
+
+    # Abre sem expor o .name (usando wrapper opaco)
+    class OpaqueStream:
+        def __init__(self, f):
+            self._f = f
+        def seek(self, *a, **k): return self._f.seek(*a, **k)
+        def read(self, *a, **k): return self._f.read(*a, **k)
+        def tell(self): return self._f.tell()
+
+    with open(raw_disk, "rb") as real_f:
+        opaque = OpaqueStream(real_f)
+        with pytest.raises(ValueError, match="BLOQUEIO FAIL-CLOSED"):
+            FileCarver(opaque, tmp_path / "out_dir")

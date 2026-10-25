@@ -48,6 +48,7 @@ class SmartReport:
     spin_retries: int = 0
     power_on_hours: Optional[int] = None
     attributes: Dict[int, SmartAttribute] = field(default_factory=dict)
+    windows_reliability: Optional[Dict[str, int]] = None
     summary_messages: List[str] = field(default_factory=list)
     action_recommendation: str = ""
     # Seções estruturadas para relatório técnico rigoroso
@@ -78,15 +79,28 @@ def analyze_smart_data(
     serial: str,
     raw_attributes: Dict[int, int],
     temperature_c: Optional[int] = None,
-    normalized_attributes: Optional[Dict[int, tuple[int, int, int]]] = None
+    normalized_attributes: Optional[Dict[int, tuple[int, int, int]]] = None,
+    windows_reliability: Optional[Dict[str, int]] = None
 ) -> SmartReport:
     """
     Interpreta valores brutos SMART e gera diagnóstico técnico com regras forenses.
     Não preenche valores normalizados fictícios (current/worst/threshold) a menos que
     fornecidos explicitamente pelo hardware.
     """
-    # Se não houver atributos SMART nem contadores de telemetria disponíveis, não declarar verde falsamente
+    # Se não houver atributos SMART de hardware disponíveis, não declarar verde falsamente
     if not raw_attributes:
+        evidencias = ["Nenhum atributo S.M.A.R.T. de hardware do fabricante retornado."]
+        if windows_reliability:
+            evidencias.append(
+                f"Métricas do Subsistema Windows (StorageReliabilityCounter): "
+                f"ReadErrors={windows_reliability.get('ReadErrorsTotal', 0)}, "
+                f"WriteErrors={windows_reliability.get('WriteErrorsTotal', 0)}, "
+                f"Wear={windows_reliability.get('Wear', 0)}"
+            )
+        limitacoes = [
+            "A telemetria S.M.A.R.T. do fabricante não pôde ser consultada diretamente (ex: adaptador USB sem ATA pass-through).",
+            "Métricas do SO refletem apenas retentativas no nível de software e não substituem o diagnóstico de hardware."
+        ]
         return SmartReport(
             device_id=device_id,
             device_path=device_path,
@@ -101,14 +115,15 @@ def analyze_smart_data(
             spin_retries=0,
             power_on_hours=None,
             attributes={},
-            summary_messages=["Telemetria S.M.A.R.T. não disponível ou insuficiente para este dispositivo."],
+            windows_reliability=windows_reliability,
+            summary_messages=["Telemetria S.M.A.R.T. do fabricante não disponível ou insuficiente para este dispositivo."],
             action_recommendation=(
-                "O hardware ou driver não retornou contadores S.M.A.R.T. válidos. "
+                "O hardware ou driver não retornou registros S.M.A.R.T. válidos. "
                 "Em caso de suspeita de instabilidade física, realize clonagem preventiva setor a setor."
             ),
-            evidencia_observada=["Nenhum atributo S.M.A.R.T. ou contador de confiabilidade retornado pelo firmware."],
-            hipotese_provavel=["Dispositivo USB sem ATA pass-through, unidade virtual/simulada ou telemetria inacessível."],
-            limitacoes=["Sem acesso aos registradores de hardware, o status de confiabilidade não pode ser afirmado como saudável nem crítico."],
+            evidencia_observada=evidencias,
+            hipotese_provavel=["Dispositivo USB sem ATA pass-through, unidade virtual/simulada ou firmware com telemetria restrita."],
+            limitacoes=limitacoes,
             acao_sugerida="Proceder com clonagem resiliente para resguardar os dados caso haja lentidão ou sintomas de falha."
         )
 
@@ -240,7 +255,7 @@ def analyze_smart_data(
 
 
 def query_smart_report_windows(device_number: int, device_path: str, model: str, serial: str) -> SmartReport:
-    """Obtém os contadores de confiabilidade e atributos SMART no Windows sem confundir métricas de SO com bad sectors."""
+    """Obtém os contadores de confiabilidade do Windows sem confundir métricas de SO com registros SMART de hardware."""
     script = f"""
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
     $phys = Get-PhysicalDisk | Where-Object {{ $_.DeviceId -eq '{device_number}' }} | Select-Object -First 1
@@ -261,7 +276,7 @@ def query_smart_report_windows(device_number: int, device_path: str, model: str,
     creationflags = 0x08000000 if os.name == "nt" else 0
 
     temperature = None
-    raw_attrs = {}
+    win_reliability: Dict[str, int] = {}
 
     try:
         r = subprocess.run(cmd, capture_output=True, timeout=10, creationflags=creationflags)
@@ -270,15 +285,12 @@ def query_smart_report_windows(device_number: int, device_path: str, model: str,
         if stdout:
             data = json.loads(stdout)
             temperature = data.get("Temperature")
-            read_err = data.get("ReadErrorsTotal")
-            wear = data.get("Wear")
-            # ReadErrorsTotal do Windows StorageReliabilityCounter reflete contadores de leitura do SO,
-            # NÃO deve ser atribuído ao SMART ID 197 (Current Pending Sector).
-            # Mapeamos para SMART ID 1 (Raw Read Error Rate) se presente.
-            if read_err is not None:
-                raw_attrs[1] = int(read_err)
-            if wear is not None and wear > 0:
-                raw_attrs[233] = int(wear)
+            if data.get("ReadErrorsTotal") is not None:
+                win_reliability["ReadErrorsTotal"] = int(data.get("ReadErrorsTotal"))
+            if data.get("WriteErrorsTotal") is not None:
+                win_reliability["WriteErrorsTotal"] = int(data.get("WriteErrorsTotal"))
+            if data.get("Wear") is not None:
+                win_reliability["Wear"] = int(data.get("Wear"))
     except Exception as exc:
         log.debug("Falha na consulta de StorageReliabilityCounter: %s", exc)
 
@@ -287,6 +299,7 @@ def query_smart_report_windows(device_number: int, device_path: str, model: str,
         device_path=device_path,
         model=model,
         serial=serial,
-        raw_attributes=raw_attrs,
-        temperature_c=temperature
+        raw_attributes={},  # Sem atributos SMART de hardware falsamente mapeados
+        temperature_c=temperature,
+        windows_reliability=win_reliability if win_reliability else None
     )

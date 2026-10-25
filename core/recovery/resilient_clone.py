@@ -121,8 +121,8 @@ class CloneMap:
             f.flush()
             try:
                 os.fsync(f.fileno())
-            except OSError:
-                pass
+            except OSError as err:
+                log.warning("fsync não pôde ser completado no arquivo temporário de mapa: %s", err)
         os.replace(tmp_path, map_path)
 
     @classmethod
@@ -190,11 +190,19 @@ class CloneMap:
 
             # Verificação de coerência com o arquivo físico de imagem
             rescued_in_map = sum(b.sector_count for b in blocks if b.status == "+")
+            expected_size = expected_sectors * data.get("sector_size", SECTOR_SIZE)
             if rescued_in_map > 0:
-                if not expected_output.exists() or expected_output.stat().st_size == 0:
+                if not expected_output.exists():
                     log.warning(
-                        "Mapa rejeitado: o mapa indica %d setores recuperados, mas o arquivo de imagem '%s' não existe ou está vazio.",
+                        "Mapa rejeitado: o mapa indica %d setores recuperados, mas o arquivo de imagem '%s' não existe.",
                         rescued_in_map, expected_output
+                    )
+                    return None
+                actual_size = expected_output.stat().st_size
+                if actual_size < expected_size:
+                    log.warning(
+                        "Mapa rejeitado: arquivo de imagem truncado detectado (%d bytes < %d bytes esperados para %d setores).",
+                        actual_size, expected_size, expected_sectors
                     )
                     return None
 
@@ -258,11 +266,27 @@ class ResilientCloner:
         self.total_sectors = total_sectors
         self.block_sectors = block_sectors
         self.skip_step_sectors = skip_step_sectors
-        self.map_path = map_path or self.output_image_path.with_suffix(".map")
+        self.map_path = Path(map_path) if map_path else self.output_image_path.with_suffix(".map")
         self.cancel_requested = False
 
         # Validação de segurança P0 Fail-Closed: Impedir gravação no mesmo disco físico
         assert_safe_source_and_destination(self.device_path, self.output_image_path)
+
+        # Validação de segurança P0 do arquivo de mapa:
+        # 1. Impedir que map_path coincida com output_image_path (evitar destruição da imagem de saída)
+        try:
+            if self.output_image_path.resolve() == self.map_path.resolve():
+                raise ValueError(
+                    f"Conflito crítico: o arquivo de mapa (map_path) não pode ser idêntico à imagem de destino "
+                    f"({self.map_path}). Salvar o mapa sobre a imagem destruiria os dados resgatados."
+                )
+        except OSError:
+            if str(self.output_image_path).strip().lower() == str(self.map_path).strip().lower():
+                raise ValueError("O arquivo de mapa (map_path) não pode coincidir com a imagem de destino.")
+
+        # 2. Impedir que o mapa ou seus temporários sejam gravados no mesmo disco físico de origem
+        assert_safe_source_and_destination(self.device_path, self.map_path)
+        assert_safe_source_and_destination(self.device_path, self.map_path.with_suffix(".map.tmp"))
 
         # Verifica espaço em disco disponível no destino
         try:
@@ -314,19 +338,19 @@ class ResilientCloner:
         bytes_rescued_in_run = 0
         iteration_count = 0
 
-        # Cria ou pré-aloca o arquivo de saída
-        with open(self.output_image_path, "a+b") as dst:
+        # Cria ou pré-aloca o arquivo de saída no tamanho integral dos setores esperados
+        mode = "r+b" if self.output_image_path.exists() else "w+b"
+        with open(self.output_image_path, mode) as dst:
             dst.seek(0, os.SEEK_END)
             cur_size = dst.tell()
             target_size = self.total_sectors * SECTOR_SIZE
             if cur_size < target_size:
-                dst.seek(target_size - 1)
-                dst.write(b"\x00")
+                dst.truncate(target_size)
                 dst.flush()
                 try:
                     os.fsync(dst.fileno())
-                except OSError:
-                    pass
+                except OSError as err:
+                    log.debug("Aviso de durabilidade: fsync na imagem: %s", err)
 
         # Leitor customizado ou leitura nativa direta do dispositivo (abertura estrita somente leitura)
         def default_reader(lba: int, count: int) -> bytes:
@@ -377,8 +401,8 @@ class ResilientCloner:
                         dst_file.flush()
                         try:
                             os.fsync(dst_file.fileno())
-                        except OSError:
-                            pass
+                        except OSError as err:
+                            log.debug("Aviso de durabilidade: fsync na imagem: %s", err)
                         self.clone_map.save_map(self.map_path)
                         last_save_time = now
 
@@ -398,8 +422,8 @@ class ResilientCloner:
             dst_file.flush()
             try:
                 os.fsync(dst_file.fileno())
-            except OSError:
-                pass
+            except OSError as err:
+                log.debug("Aviso de durabilidade: fsync na imagem: %s", err)
             self.clone_map.save_map(self.map_path)
 
             # ── FASE 2: RASPAGEM CIRÚRGICA DE TODOS OS SETORES PULADOS ───────────
@@ -434,8 +458,8 @@ class ResilientCloner:
                             dst_file.flush()
                             try:
                                 os.fsync(dst_file.fileno())
-                            except OSError:
-                                pass
+                            except OSError as err:
+                                log.debug("Aviso de durabilidade: fsync na imagem: %s", err)
                             self.clone_map.save_map(self.map_path)
                             last_save_time = now
 
@@ -455,8 +479,8 @@ class ResilientCloner:
             dst_file.flush()
             try:
                 os.fsync(dst_file.fileno())
-            except OSError:
-                pass
+            except OSError as err:
+                log.debug("Aviso de durabilidade: fsync na imagem: %s", err)
 
         self.clone_map.save_map(self.map_path)
         self.clone_map.recalculate_counts()

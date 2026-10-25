@@ -268,3 +268,45 @@ def test_clone_map_rejects_corrupted_or_gapped_intervals(tmp_path: Path):
     map_file.write_text(json.dumps(claimed_rescued_missing_img), encoding="utf-8")
     assert not img_file.exists()
     assert CloneMap.load_map(map_file, "mock://dev", img_file, 100) is None
+
+    # Caso 5: Imagem existe, mas está truncada (menor que total_sectors * SECTOR_SIZE)
+    img_file.write_bytes(b"\x00" * (50 * SECTOR_SIZE))  # Apenas 50 setores em vez de 100
+    assert CloneMap.load_map(map_file, "mock://dev", img_file, 100) is None, "Deve rejeitar mapa quando imagem estiver truncada!"
+
+    # Caso 6: Imagem com tamanho exato (100 setores) -> Aceito!
+    img_file.write_bytes(b"\x00" * (100 * SECTOR_SIZE))
+    assert CloneMap.load_map(map_file, "mock://dev", img_file, 100) is not None
+
+
+def test_cloner_rejects_map_path_identical_to_output_image(tmp_path: Path):
+    """P0 Teste: Impede categoricamente que map_path coincida com output_image_path (destruição de imagem)."""
+    img_path = tmp_path / "cloned.img"
+    with pytest.raises(ValueError, match="não pode ser idêntico à imagem de destino"):
+        ResilientCloner(
+            device_path="mock://drive",
+            output_image_path=img_path,
+            total_sectors=100,
+            map_path=img_path  # COLISÃO PROIBIDA!
+        )
+
+
+def test_cloner_rejects_map_path_on_same_physical_disk_as_source(monkeypatch, tmp_path: Path):
+    """P0 Teste: Impede que o arquivo de mapa ou seu temporário seja salvo no disco físico de origem."""
+    def mock_drive_resolver(path):
+        p = str(path).lower()
+        if "physicaldrive0" in p or "c:" in p:
+            return 0
+        if "d:" in p:
+            return 1
+        return None
+
+    monkeypatch.setattr("core.hardware.device_resolver.get_physical_drive_number", mock_drive_resolver)
+
+    # Imagem de destino está em D: (disco 1 - seguro), mas mapa em C: (disco 0 - MESMO DISCO DE ORIGEM -> BLOQUEADO!)
+    with pytest.raises(ValueError, match="mesmo disco físico"):
+        ResilientCloner(
+            device_path=r"\\.\PhysicalDrive0",
+            output_image_path=r"D:\Imagens\disco.img",
+            total_sectors=100,
+            map_path=r"C:\Resgate\disco.map"
+        )

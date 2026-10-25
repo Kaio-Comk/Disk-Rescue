@@ -175,20 +175,28 @@ def test_carver_structural_integrity_verification(tmp_path: Path):
 
     # 3. PDF válido vs truncado
     valid_pdf = out_dir / "valid.pdf"
-    valid_pdf.write_bytes(b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n")
+    pdf_lead = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n"
+    valid_pdf.write_bytes(pdf_lead + b"xref\ntrailer\n<<>>\nstartxref\n" + str(len(pdf_lead)).encode() + b"\n%%EOF\n")
     assert FileCarver.verify_file_integrity(valid_pdf, "PDF") is True
 
     broken_pdf = out_dir / "broken.pdf"
     broken_pdf.write_bytes(b"%PDF-1.4\nincomplete data without eof")
     assert FileCarver.verify_file_integrity(broken_pdf, "PDF") is False
 
-    # 4. PNG válido vs truncado/inválido
+    # 4. PNG válido com CRC matematicamente verificado vs CRC corrompido vs truncado
+    import zlib
     valid_png = out_dir / "valid.png"
-    # Header de 8 bytes + chunk IHDR de 25 bytes + IEND de 12 bytes
-    ihdr_chunk = struct.pack(">I", 13) + b"IHDR" + (b"\x00" * 13) + (b"\x00" * 4)
-    iend_chunk = struct.pack(">I", 0) + b"IEND" + (b"\x00" * 4)
+    ihdr_data = b"\x00" * 13
+    ihdr_crc = struct.pack(">I", zlib.crc32(b"IHDR" + ihdr_data) & 0xffffffff)
+    ihdr_chunk = struct.pack(">I", 13) + b"IHDR" + ihdr_data + ihdr_crc
+    iend_crc = struct.pack(">I", zlib.crc32(b"IEND") & 0xffffffff)
+    iend_chunk = struct.pack(">I", 0) + b"IEND" + iend_crc
     valid_png.write_bytes(b"\x89PNG\r\n\x1a\n" + ihdr_chunk + iend_chunk)
     assert FileCarver.verify_file_integrity(valid_png, "PNG") is True
+
+    bad_crc_png = out_dir / "bad_crc.png"
+    bad_crc_png.write_bytes(b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + ihdr_data + b"\xde\xad\xbe\xef" + iend_chunk)
+    assert FileCarver.verify_file_integrity(bad_crc_png, "PNG") is False
 
     broken_png = out_dir / "broken.png"
     broken_png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"CORRUPTED_WITHOUT_IHDR_OR_IEND")
@@ -219,3 +227,44 @@ def test_physical_drive_conflict_fail_closed_when_unresolved(monkeypatch):
 
     with pytest.raises(ValueError, match="BLOQUEIO FAIL-CLOSED"):
         assert_safe_source_and_destination(r"\\.\PhysicalDrive0", r"X:\Imagens\disco.img")
+
+
+def test_physical_drive_conflict_fail_closed_when_destination_physical_and_source_unresolved(monkeypatch):
+    """
+    P0 Teste Crítico Fail-Closed Universal: Quando o destino for um disco físico e a origem
+    não puder ser resolvida com certeza, a operação DEVE ser bloqueada preventivamente.
+    """
+    def mock_dest_physical(path):
+        p = str(path).lower()
+        if "physicaldrive1" in p:
+            return 1
+        return None
+
+    monkeypatch.setattr("core.hardware.device_resolver.get_physical_drive_number", mock_dest_physical)
+
+    with pytest.raises(ValueError, match="BLOQUEIO FAIL-CLOSED"):
+        assert_safe_source_and_destination(r"X:\Imagens\origem.img", r"\\.\PhysicalDrive1")
+
+
+def test_volume_guid_conflict_detection(monkeypatch):
+    r"""
+    P0 Teste Crítico: Garante que caminhos com Volume GUID (\\?\Volume{...}) sejam classificados
+    como dispositivos de baixo nível e bloqueiem conflitos no mesmo disco físico.
+    """
+    def mock_guid_resolver(path):
+        p = str(path).lower()
+        if "volume{12345678-1234-1234-1234-123456789abc}" in p or "c:" in p:
+            return 0  # Ambos estão no PhysicalDrive0
+        if "d:" in p:
+            return 1  # No PhysicalDrive1
+        return None
+
+    monkeypatch.setattr("core.hardware.device_resolver.get_physical_drive_number", mock_guid_resolver)
+
+    vol_guid_path = r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\\"
+    # Mesma unidade física (disco 0) -> BLOQUEADO!
+    with pytest.raises(ValueError, match="mesmo disco físico"):
+        assert_safe_source_and_destination(vol_guid_path, r"C:\Resgate\disco.img")
+
+    # Unidades físicas diferentes (disco 0 vs disco 1) -> PERMITIDO!
+    assert_safe_source_and_destination(vol_guid_path, r"D:\Resgate\disco.img")

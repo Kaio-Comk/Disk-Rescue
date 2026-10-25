@@ -17,12 +17,12 @@ A aplicação conta com uma interface desktop moderna no padrão **Windows 11 Fl
 ## ⚡ Download Imediato do Executável
 
 Baixe a versão mais recente pronta para uso:
-👉 **[Baixar DiskRescue v0.2.1 (Executável Portátil)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)**
+👉 **[Baixar DiskRescue v0.2.2 (Executável Portátil)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)**
 
 * **Portátil e Autônomo:** Não requer instalação de Python nem dependências externas (~11.6 MB).
 * **Integridade Criptográfica (SHA-256):**
   ```text
-  CB5C846C69CD5FBDDD838F72BFCB62A59462F41BF2FF4AF072C7156DF26DD087
+  B2B638EDF207891DC86D42FD82D3C9814CB848752DF51EE5D173A7874928DBC7
   ```
 * **Elevação UAC Automática:** Manifest embutido solicita privilégios de Administrador ao iniciar, garantindo acesso direto de baixo nível (`\\.\PhysicalDriveX`).
 
@@ -168,55 +168,66 @@ flowchart TD
 ## 🛡️ Política de Segurança Inviolável (*Do No Harm*)
 
 O DiskRescue foi concebido com foco absoluto na integridade física e preservação dos dados:
-1. **Modo Somente Leitura por Padrão (Write-Blocker):** Suíte auditada com `StrictReadOnlyDeviceStream`. Qualquer tentativa indevida de escrita (`write`, `writelines`, `truncate`) levanta `WriteBlockViolationError`.
-2. **Bloqueio P0 Fail-Closed de Disco Físico (Device Resolver):** Resolução profunda de hardware via `IOCTL_STORAGE_GET_DEVICE_NUMBER` com protótipos Win32 64-bit explícitos. Bloqueia sumariamente a gravação se a imagem de destino ou pasta de carving estiver em qualquer partição do mesmo disco físico da origem (ex: `\\.\PhysicalDrive0` vs `C:\` ou `B:\`). Adota política Fail-Closed: se a identidade física de origem ou destino não puder ser comprovada com certeza absoluta, a operação é bloqueada preventivamente.
-3. **Snapshots Preventivos Obrigatórios:** Nenhuma gravação de setor físico é executada sem que uma cópia binária exata do setor original seja gravada no disco local (`mbr_backup_*.bin`, `ntfs_vbr_backup_*.bin`).
-4. **Validação Estrutural Pós-Carving:** Arquivos resgatados passam por checagem de integridade (estrutura ZIP, marcadores PDF e delimitadores de imagem) para eliminar falsos positivos.
-5. **Cancelamento Gracioso:** Todas as threads de clonagem, varredura de superfície e carving respondem a sinais de interrupção imediata preservando o progresso salvo.
+1. **Software Write-Guard por Padrão ("Do No Harm"):** Suíte auditada com `StrictReadOnlyDeviceStream`. Intercepta no nível de processo qualquer tentativa indevida de escrita (`write`, `writelines`, `truncate`), levantando `WriteBlockViolationError`. *(Nota forense: atua como barreira de proteção de software de alto nível; para custódia pericial de bancada física, recomenda-se complementar com hardware write-blocker dedicado).*
+2. **Bloqueio P0 Fail-Closed Universal de Disco Físico (Device Resolver):** Resolução profunda de hardware via `IOCTL_STORAGE_GET_DEVICE_NUMBER` com protótipos Win32 64-bit explícitos (`ctypes.wintypes.HANDLE`), suportando letras de unidade, dispositivos `PhysicalDriveN` e caminhos de Volume GUID (`\\?\Volume{...}`). Adota política Fail-Closed universal: se a identidade física de origem ou destino não puder ser categoricamente comprovada como independente, a operação é bloqueada preventivamente.
+3. **Proteção de Integridade do Mapa (`map_path`):** O arquivo de mapa é protegido contra colisão com a própria imagem de saída (evitando sobrescrita acidental) e impedido de ser gravado no disco físico de origem.
+4. **Validação de Imagem na Retomada (Resume):** Rejeita retomar clonagens quando o arquivo físico de imagem em disco estiver ausente ou truncado em relação ao tamanho total esperado dos setores.
+5. **Snapshots Preventivos Obrigatórios:** Nenhuma gravação de setor físico é executada sem que uma cópia binária exata do setor original seja gravada no disco local (`mbr_backup_*.bin`, `ntfs_vbr_backup_*.bin`).
+6. **Validação Estrutural Profunda Pós-Carving:** Verificação pós-extração com cálculo real de CRC32 em chunks PNG, validação de marcadores e dimensões SOF em JPEG, verificação de offset `startxref` em PDF e `zipfile.testzip()` em arquivos compactados. Falsos positivos são descartados ou isolados.
+7. **Cancelamento Gracioso:** Todas as threads de clonagem, varredura de superfície e carving respondem a sinais de interrupção imediata preservando o progresso salvo.
 
 ---
 
 ## 🧪 Cobertura de Testes Automatizados
 
-O sistema conta com suíte completa de 32 testes unitários automatizados com discos sintéticos em memória, streams bloqueadores e arquivos temporários:
+O sistema conta com suíte completa de 40 testes unitários automatizados com discos sintéticos em memória, streams bloqueadores e arquivos temporários:
 
 ```bash
 $ pytest tests/ -v
 ============================= test session starts =============================
-tests/test_carver.py::test_carver_detects_and_extracts_files PASSED      [  3%]
-tests/test_carver.py::test_carver_cross_block_large_file_over_1mb PASSED [  6%]
-tests/test_carver.py::test_carver_file_crossing_boundary_over_4kb PASSED [  9%]
-tests/test_carver.py::test_carver_handles_false_signatures_and_truncated_files PASSED [ 12%]
-tests/test_carver.py::test_carver_extracts_png_with_ihdr_and_iend PASSED [ 15%]
-tests/test_fat_exfat.py::test_parse_fat32_and_exfat PASSED               [ 18%]
-tests/test_fat_exfat.py::test_scan_boot_sectors_discovers_fat32_and_exfat PASSED [ 21%]
-tests/test_gpt_repair.py::test_parse_gpt_valida_crc PASSED               [ 25%]
-tests/test_gpt_repair.py::test_rebuild_gpt_corrige_offset_e_recalcula_crc PASSED [ 28%]
-tests/test_mbr.py::test_parse_and_rebuild_mbr PASSED                     [ 31%]
-tests/test_mbr.py::test_repair_mbr_partition_in_file PASSED              [ 34%]
+tests/test_carver.py::test_carver_detects_and_extracts_files PASSED      [  2%]
+tests/test_carver.py::test_carver_cross_block_large_file_over_1mb PASSED [  5%]
+tests/test_carver.py::test_carver_file_crossing_boundary_over_4kb PASSED [  7%]
+tests/test_carver.py::test_carver_handles_false_signatures_and_truncated_files PASSED [ 10%]
+tests/test_carver.py::test_carver_extracts_png_with_ihdr_and_iend PASSED [ 12%]
+tests/test_carver.py::test_carver_rejects_negative_or_zero_chunk_sectors PASSED [ 15%]
+tests/test_carver.py::test_carver_does_not_overwrite_existing_recovered_files PASSED [ 17%]
+tests/test_carver.py::test_carver_rejects_anonymous_unidentified_stream PASSED [ 20%]
+tests/test_fat_exfat.py::test_parse_fat32_and_exfat PASSED               [ 22%]
+tests/test_fat_exfat.py::test_scan_boot_sectors_discovers_fat32_and_exfat PASSED [ 25%]
+tests/test_gpt_repair.py::test_parse_gpt_valida_crc PASSED               [ 27%]
+tests/test_gpt_repair.py::test_rebuild_gpt_corrige_offset_e_recalcula_crc PASSED [ 30%]
+tests/test_mbr.py::test_parse_and_rebuild_mbr PASSED                     [ 32%]
+tests/test_mbr.py::test_repair_mbr_partition_in_file PASSED              [ 35%]
 tests/test_ntfs_boot_repair.py::test_diagnose_and_restore_ntfs_boot_sector PASSED [ 37%]
 tests/test_resilient_clone.py::test_resilient_clone_clean_disk PASSED    [ 40%]
-tests/test_resilient_clone.py::test_resilient_clone_synthetic_lba_exact_verification PASSED [ 43%]
-tests/test_resilient_clone.py::test_resilient_clone_resume_from_interrupted_map PASSED [ 46%]
-tests/test_resilient_clone.py::test_clone_map_rejects_mismatched_device PASSED [ 50%]
-tests/test_resilient_clone.py::test_clone_parameters_strictly_positive PASSED [ 53%]
-tests/test_resilient_clone.py::test_clone_map_rejects_corrupted_or_gapped_intervals PASSED [ 56%]
-tests/test_safety_write_blocker.py::test_strict_read_only_stream_throws_on_any_write PASSED [ 59%]
+tests/test_resilient_clone.py::test_resilient_clone_synthetic_lba_exact_verification PASSED [ 42%]
+tests/test_resilient_clone.py::test_resilient_clone_resume_from_interrupted_map PASSED [ 45%]
+tests/test_resilient_clone.py::test_clone_map_rejects_mismatched_device PASSED [ 47%]
+tests/test_resilient_clone.py::test_clone_parameters_strictly_positive PASSED [ 50%]
+tests/test_resilient_clone.py::test_clone_map_rejects_corrupted_or_gapped_intervals PASSED [ 52%]
+tests/test_resilient_clone.py::test_cloner_rejects_map_path_identical_to_output_image PASSED [ 55%]
+tests/test_resilient_clone.py::test_cloner_rejects_map_path_on_same_physical_disk_as_source PASSED [ 57%]
+tests/test_safety_write_blocker.py::test_strict_read_only_stream_throws_on_any_write PASSED [ 60%]
 tests/test_safety_write_blocker.py::test_instrumented_stream_with_carver_and_parsers PASSED [ 62%]
 tests/test_safety_write_blocker.py::test_cloner_source_never_receives_writes PASSED [ 65%]
-tests/test_safety_write_blocker.py::test_physical_drive_conflict_detection_blocks_same_disk PASSED [ 68%]
-tests/test_safety_write_blocker.py::test_cloner_blocks_exact_same_file PASSED [ 71%]
-tests/test_safety_write_blocker.py::test_carver_structural_integrity_verification PASSED [ 75%]
-tests/test_safety_write_blocker.py::test_physical_drive_conflict_fail_closed_when_unresolved PASSED [ 78%]
-tests/test_smart_diagnostics.py::test_smart_healthy PASSED               [ 81%]
-tests/test_smart_diagnostics.py::test_smart_sata_cable_fault_detected PASSED [ 84%]
+tests/test_safety_write_blocker.py::test_physical_drive_conflict_detection_blocks_same_disk PASSED [ 67%]
+tests/test_safety_write_blocker.py::test_cloner_blocks_exact_same_file PASSED [ 70%]
+tests/test_safety_write_blocker.py::test_carver_structural_integrity_verification PASSED [ 72%]
+tests/test_safety_write_blocker.py::test_physical_drive_conflict_fail_closed_when_unresolved PASSED [ 75%]
+tests/test_safety_write_blocker.py::test_physical_drive_conflict_fail_closed_when_destination_physical_and_source_unresolved PASSED [ 77%]
+tests/test_safety_write_blocker.py::test_volume_guid_conflict_detection PASSED [ 80%]
+tests/test_smart_diagnostics.py::test_smart_healthy PASSED               [ 82%]
+tests/test_smart_diagnostics.py::test_smart_sata_cable_fault_detected PASSED [ 85%]
 tests/test_smart_diagnostics.py::test_smart_surface_critical_degradation PASSED [ 87%]
 tests/test_smart_diagnostics.py::test_smart_mechanical_spin_retry PASSED [ 90%]
-tests/test_smart_diagnostics.py::test_smart_no_telemetry_returns_unknown PASSED [ 93%]
-tests/test_smart_diagnostics.py::test_smart_read_errors_not_confused_with_pending_sectors PASSED [ 96%]
+tests/test_smart_diagnostics.py::test_smart_no_telemetry_returns_unknown PASSED [ 92%]
+tests/test_smart_diagnostics.py::test_smart_read_errors_not_confused_with_pending_sectors PASSED [ 95%]
+tests/test_smart_diagnostics.py::test_smart_windows_reliability_counters_remain_segregated_and_unknown PASSED [ 97%]
 tests/test_surface_scan.py::test_surface_scan_measures_blocks PASSED     [100%]
 
-============================= 32 passed in 2.96s ==============================
+============================= 40 passed in 3.37s ==============================
+```
 ```
 
 ---
