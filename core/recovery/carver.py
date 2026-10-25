@@ -66,31 +66,64 @@ class FileCarver:
 
     @staticmethod
     def verify_file_integrity(file_path: Path, kind: str) -> bool:
-        """Valida a integridade estrutural após a extração."""
+        """Valida a integridade estrutural após a extração sem carregar o arquivo inteiro na memória."""
         try:
-            if not file_path.exists() or file_path.stat().st_size == 0:
+            if not file_path.exists():
+                return False
+            size = file_path.stat().st_size
+            if size == 0:
                 return False
 
             if kind == "ZIP":
                 import zipfile
                 with zipfile.ZipFile(file_path, "r") as zf:
                     return zf.testzip() is None
-            elif kind == "PDF":
-                data = file_path.read_bytes()
-                if not data.startswith(b"%PDF-"):
-                    return False
-                # Procura %%EOF nos últimos 4KB ou startxref
-                tail = data[-4096:] if len(data) >= 4096 else data
-                return b"%%EOF" in tail or b"startxref" in tail
+
             elif kind == "PNG":
-                data = file_path.read_bytes()
-                if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+                if size < 32:
                     return False
-                tail = data[-64:] if len(data) >= 64 else data
-                return b"IEND" in tail
+                with open(file_path, "rb") as f:
+                    header = f.read(16)
+                    if len(header) < 16 or not header.startswith(b"\x89PNG\r\n\x1a\n"):
+                        return False
+                    # Valida que o primeiro chunk é IHDR (bytes 12..16)
+                    if header[12:16] != b"IHDR":
+                        return False
+                    # Valida a presença de IEND nos últimos 64 bytes
+                    tail_len = min(64, size)
+                    f.seek(size - tail_len)
+                    tail = f.read(tail_len)
+                    return b"IEND" in tail
+
             elif kind == "JPEG":
-                data = file_path.read_bytes()
-                return data.startswith(b"\xff\xd8\xff") and data.endswith(b"\xff\xd9")
+                if size < 4:
+                    return False
+                with open(file_path, "rb") as f:
+                    header = f.read(4)
+                    if len(header) < 4 or not header.startswith(b"\xff\xd8\xff"):
+                        return False
+                    # O 4º byte deve ser um marcador válido (0xe0=JFIF, 0xe1=Exif, 0xdb=DQT, 0xc0=SOF, etc.)
+                    marker = header[3]
+                    if not (0xc0 <= marker <= 0xfe):
+                        return False
+                    f.seek(size - 2)
+                    tail = f.read(2)
+                    return tail == b"\xff\xd9"
+
+            elif kind == "PDF":
+                if size < 32:
+                    return False
+                with open(file_path, "rb") as f:
+                    header = f.read(8)
+                    if not header.startswith(b"%PDF-"):
+                        return False
+                    tail_len = min(4096, size)
+                    f.seek(size - tail_len)
+                    tail = f.read(tail_len)
+                    if b"%%EOF" not in tail:
+                        return False
+                    return b"xref" in tail or b"startxref" in tail or b"trailer" in tail or b"/Root" in tail
+
             return True
         except Exception:
             return False
@@ -111,50 +144,87 @@ class FileCarver:
     ) -> Optional[CarvedFile]:
         """
         Localiza o final do arquivo e o extrai através de múltiplos blocos e fronteiras,
-        acumulando buffers até encontrar o delimitador de encerramento ou limite máximo.
+        escrevendo chunks diretamente em disco (streaming spooling com consumo O(1) de memória),
+        mantendo um buffer deslizante de até 128 KB para detecção precisa do footer delimitador.
         """
-        stream.seek(start_offset)
-        initial_chunk_size = 64 * 1024  # 64 KB por lote de leitura de arquivo
-        accumulated = bytearray()
-        footer_found_pos = -1
-
-        while len(accumulated) < max_size and not self.cancel_requested:
-            chunk = stream.read(min(initial_chunk_size, max_size - len(accumulated)))
-            if not chunk:
-                break
-            accumulated.extend(chunk)
-
-            # Procura footer
-            idx = accumulated.find(footer_sig)
-            if idx != -1:
-                if kind == "PDF":
-                    # PDFs podem ter múltiplos %%EOF devido a revisões; busca a última ocorrência no chunk
-                    last_idx = accumulated.rfind(footer_sig)
-                    # Verifica se há mais dados imediatamente após
-                    footer_found_pos = last_idx + len(footer_sig)
-                elif kind == "ZIP":
-                    # O registro EOCD (PK\x05\x06) possui no mínimo 22 bytes
-                    if len(accumulated) >= idx + 22:
-                        comment_len = struct.unpack_from("<H", accumulated, idx + 20)[0]
-                        footer_found_pos = min(len(accumulated), idx + 22 + comment_len)
-                    else:
-                        continue
-                else:
-                    footer_found_pos = idx + len(footer_sig)
-                break
-
-        if footer_found_pos == -1 or footer_found_pos < len(header_sig) + 4:
-            # Assinatura falsa ou arquivo truncado sem footer válido
-            return None
-
-        file_bytes = bytes(accumulated[:footer_found_pos])
-        file_len = len(file_bytes)
-        file_lba = start_offset // SECTOR_SIZE
-
-        # Salva em arquivo temporário para validação estrutural
         temp_name = f"recovered_{file_counter:04d}{ext}"
         candidate_path = self.output_dir / temp_name
-        candidate_path.write_bytes(file_bytes)
+
+        stream.seek(start_offset)
+        chunk_size = 64 * 1024  # 64 KB por lote
+        total_written = 0
+        rolling_tail = bytearray()
+        footer_pos_in_file = -1
+        found_footer = False
+
+        try:
+            with open(candidate_path, "wb") as out_f:
+                while total_written < max_size and not self.cancel_requested:
+                    to_read = min(chunk_size, max_size - total_written)
+                    chunk = stream.read(to_read)
+                    if not chunk:
+                        break
+
+                    out_f.write(chunk)
+                    prev_total = total_written
+                    total_written += len(chunk)
+
+                    combined = rolling_tail + chunk
+                    combined_base = prev_total - len(rolling_tail)
+
+                    # Busca footer no buffer deslizante
+                    idx = combined.find(footer_sig)
+                    if idx != -1:
+                        if kind == "PDF":
+                            # PDFs podem ter revisões incrementais; procura a última ocorrência no buffer
+                            last_idx = combined.rfind(footer_sig)
+                            footer_pos_in_file = combined_base + last_idx + len(footer_sig)
+                            found_footer = True
+                            break
+                        elif kind == "ZIP":
+                            # O registro EOCD (PK\x05\x06) possui no mínimo 22 bytes
+                            if len(combined) >= idx + 22:
+                                comment_len = struct.unpack_from("<H", combined, idx + 20)[0]
+                                target_end = combined_base + idx + 22 + comment_len
+                                if total_written < target_end and total_written < max_size:
+                                    needed = min(target_end - total_written, max_size - total_written)
+                                    extra = stream.read(needed)
+                                    if extra:
+                                        out_f.write(extra)
+                                        total_written += len(extra)
+                                footer_pos_in_file = min(total_written, target_end)
+                                found_footer = True
+                                break
+                            else:
+                                # Registro cortado na fronteira, avança para próximo chunk
+                                rolling_tail = combined[-128 * 1024:] if len(combined) > 128 * 1024 else combined
+                                continue
+                        else:
+                            footer_pos_in_file = combined_base + idx + len(footer_sig)
+                            found_footer = True
+                            break
+
+                    rolling_tail = combined[-128 * 1024:] if len(combined) > 128 * 1024 else combined
+
+                if found_footer and footer_pos_in_file >= len(header_sig) + 4:
+                    out_f.flush()
+                    out_f.truncate(footer_pos_in_file)
+                else:
+                    found_footer = False
+
+        except Exception as exc:
+            log.warning("Erro durante extração em disco de candidato %s: %s", temp_name, exc)
+            found_footer = False
+
+        if not found_footer or footer_pos_in_file < len(header_sig) + 4:
+            try:
+                candidate_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return None
+
+        file_len = footer_pos_in_file
+        file_lba = start_offset // SECTOR_SIZE
 
         is_valid = self.verify_file_integrity(candidate_path, kind)
 
@@ -170,6 +240,8 @@ class FileCarver:
                 # Renomeia com sufixo _corrupted para não enganar o usuário
                 corrupted_name = f"recovered_{file_counter:04d}_corrupted{ext}"
                 corrupted_path = self.output_dir / corrupted_name
+                candidate_path.replace(corrupted_path)
+                candidate_path = corrupted_path
                 candidate_path.replace(corrupted_path)
                 candidate_path = corrupted_path
 

@@ -3,8 +3,9 @@ tests/test_carver.py — Testes unitários para o motor forense de File Carving.
 Comprova extração de arquivos maiores que 1 MiB, travessia de fronteiras de blocos,
 e descarte/identificação de assinaturas falsas ou arquivos truncados.
 """
-from pathlib import Path
+import struct
 import zipfile
+from pathlib import Path
 
 from core.recovery.carver import FileCarver, SECTOR_SIZE
 
@@ -183,3 +184,36 @@ def test_carver_handles_false_signatures_and_truncated_files(tmp_path: Path):
     # Arquivos válidos devem continuar contendo apenas o ZIP
     assert len(carver_all.valid_files) == 1
     assert carver_all.valid_files[0].file_type == "ZIP"
+
+
+def test_carver_extracts_png_with_ihdr_and_iend(tmp_path: Path):
+    """P1 Teste: Extração e validação estrutural completa de arquivo PNG com chunks IHDR e IEND."""
+    disk_file = tmp_path / "disk_with_png.img"
+    total_sectors = 200
+
+    with open(disk_file, "wb") as f:
+        f.seek(total_sectors * SECTOR_SIZE - 1)
+        f.write(b"\x00")
+
+    # Monta um PNG válido no LBA 25
+    header = b"\x89PNG\r\n\x1a\n"
+    ihdr_chunk = struct.pack(">I", 13) + b"IHDR" + (b"\x00" * 13) + (b"\x12\x34\x56\x78")
+    idat_chunk = struct.pack(">I", 64) + b"IDAT" + (b"COMPRESSED_IMAGE_PIXELS_" * 2)[:64] + (b"\x9a\xbc\xde\xf0")
+    iend_chunk = struct.pack(">I", 0) + b"IEND" + b"\xaeB`\x82"
+    png_payload = header + ihdr_chunk + idat_chunk + iend_chunk
+
+    with open(disk_file, "r+b") as f:
+        f.seek(25 * SECTOR_SIZE)
+        f.write(png_payload)
+
+    out_dir = tmp_path / "carver_png_out"
+    carver = FileCarver(str(disk_file), out_dir)
+    recovered = carver.scan(max_sectors=total_sectors, chunk_sectors=50)
+
+    assert len(recovered) == 1
+    png_carved = recovered[0]
+    assert png_carved.file_type == "PNG"
+    assert png_carved.start_lba == 25
+    assert png_carved.size_bytes == len(png_payload)
+    assert png_carved.is_structurally_valid is True
+    assert png_carved.saved_path.read_bytes() == png_payload

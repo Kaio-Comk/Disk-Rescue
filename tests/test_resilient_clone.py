@@ -193,3 +193,78 @@ def test_clone_map_rejects_mismatched_device(tmp_path: Path):
         expected_sectors=999
     )
     assert loaded2 is None
+
+
+def test_clone_parameters_strictly_positive(tmp_path: Path):
+    """P1 Teste: Validação estrita de parâmetros de execução (devem ser > 0)."""
+    dst = tmp_path / "dst.img"
+    with pytest.raises(ValueError, match="estritamente positivos"):
+        ResilientCloner("mock://dev", dst, total_sectors=0)
+
+    with pytest.raises(ValueError, match="estritamente positivos"):
+        ResilientCloner("mock://dev", dst, total_sectors=100, block_sectors=0)
+
+    with pytest.raises(ValueError, match="estritamente positivos"):
+        ResilientCloner("mock://dev", dst, total_sectors=100, block_sectors=16, skip_step_sectors=-5)
+
+
+def test_clone_map_rejects_corrupted_or_gapped_intervals(tmp_path: Path):
+    """P1 Teste: Validação de intervalos contíguos e ausência de imagem física."""
+    import json
+    map_file = tmp_path / "corrupt_map.map"
+    img_file = tmp_path / "missing_img.img"
+
+    # Caso 1: Mapa com lacuna (gap) entre blocos (0..50 e depois 60..100)
+    gapped_data = {
+        "version": "2.0",
+        "device_path": "mock://dev",
+        "output_image": str(img_file),
+        "total_sectors": 100,
+        "blocks": [
+            {"start_lba": 0, "sector_count": 50, "status": "+"},
+            {"start_lba": 60, "sector_count": 40, "status": "?"}
+        ]
+    }
+    map_file.write_text(json.dumps(gapped_data), encoding="utf-8")
+    assert CloneMap.load_map(map_file, "mock://dev", img_file, 100) is None
+
+    # Caso 2: Mapa com status inválido
+    invalid_status = {
+        "version": "2.0",
+        "device_path": "mock://dev",
+        "output_image": str(img_file),
+        "total_sectors": 100,
+        "blocks": [
+            {"start_lba": 0, "sector_count": 100, "status": "UNKNOWN_BAD_STATUS"}
+        ]
+    }
+    map_file.write_text(json.dumps(invalid_status), encoding="utf-8")
+    assert CloneMap.load_map(map_file, "mock://dev", img_file, 100) is None
+
+    # Caso 3: Mapa com contagem <= 0
+    zero_count = {
+        "version": "2.0",
+        "device_path": "mock://dev",
+        "output_image": str(img_file),
+        "total_sectors": 100,
+        "blocks": [
+            {"start_lba": 0, "sector_count": 0, "status": "?"},
+            {"start_lba": 0, "sector_count": 100, "status": "?"}
+        ]
+    }
+    map_file.write_text(json.dumps(zero_count), encoding="utf-8")
+    assert CloneMap.load_map(map_file, "mock://dev", img_file, 100) is None
+
+    # Caso 4: Mapa alega setores resgatados (+), mas o arquivo de imagem não existe em disco
+    claimed_rescued_missing_img = {
+        "version": "2.0",
+        "device_path": "mock://dev",
+        "output_image": str(img_file),
+        "total_sectors": 100,
+        "blocks": [
+            {"start_lba": 0, "sector_count": 100, "status": "+"}
+        ]
+    }
+    map_file.write_text(json.dumps(claimed_rescued_missing_img), encoding="utf-8")
+    assert not img_file.exists()
+    assert CloneMap.load_map(map_file, "mock://dev", img_file, 100) is None

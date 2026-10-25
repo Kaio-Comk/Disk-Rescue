@@ -66,3 +66,31 @@ def test_smart_mechanical_spin_retry():
     assert report.risk_level == SmartRiskLevel.RED
     assert report.spin_retries == 8
     assert any("fadiga mecânica" in m.lower() for m in report.summary_messages)
+
+
+def test_smart_no_telemetry_returns_unknown():
+    # Sem atributos SMART nem contadores de telemetria, não declarar verde falsamente
+    report = analyze_smart_data(
+        device_id=4,
+        device_path=r"\\.\PhysicalDrive4",
+        model="Generic USB Flash Disk",
+        serial="UNKNOWN",
+        raw_attributes={},
+        temperature_c=None
+    )
+    assert report.risk_level == SmartRiskLevel.UNKNOWN
+    assert any("não disponível" in m.lower() or "insuficiente" in m.lower() for m in report.summary_messages)
+
+
+def test_smart_read_errors_not_confused_with_pending_sectors():
+    # Erros de leitura brutos (ID 1) não devem ser confundidos com bad sectors pendentes (ID 197)
+    report = analyze_smart_data(
+        device_id=5,
+        device_path=r"\\.\PhysicalDrive5",
+        model="Crucial SSD 500GB",
+        serial="CRU1234",
+        raw_attributes={1: 15, 5: 0, 197: 0, 198: 0, 199: 0},
+        temperature_c=32
+    )
+    assert report.pending_sectors == 0
+    assert report.reallocated_sectors == 0

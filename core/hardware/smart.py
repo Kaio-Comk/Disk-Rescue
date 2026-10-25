@@ -18,6 +18,7 @@ class SmartRiskLevel(Enum):
     GREEN = "Verde (Saudável)"
     YELLOW = "Amarelo (Atenção / Risco Moderado)"
     RED = "Vermelho (Crítico / Falha Iminente)"
+    UNKNOWN = "Cinza (Telemetria Não Disponível / Insuficiente)"
 
 
 @dataclass
@@ -84,6 +85,33 @@ def analyze_smart_data(
     Não preenche valores normalizados fictícios (current/worst/threshold) a menos que
     fornecidos explicitamente pelo hardware.
     """
+    # Se não houver atributos SMART nem contadores de telemetria disponíveis, não declarar verde falsamente
+    if not raw_attributes:
+        return SmartReport(
+            device_id=device_id,
+            device_path=device_path,
+            model=model,
+            serial=serial,
+            risk_level=SmartRiskLevel.UNKNOWN,
+            temperature_c=temperature_c,
+            reallocated_sectors=0,
+            pending_sectors=0,
+            uncorrectable_sectors=0,
+            crc_errors=0,
+            spin_retries=0,
+            power_on_hours=None,
+            attributes={},
+            summary_messages=["Telemetria S.M.A.R.T. não disponível ou insuficiente para este dispositivo."],
+            action_recommendation=(
+                "O hardware ou driver não retornou contadores S.M.A.R.T. válidos. "
+                "Em caso de suspeita de instabilidade física, realize clonagem preventiva setor a setor."
+            ),
+            evidencia_observada=["Nenhum atributo S.M.A.R.T. ou contador de confiabilidade retornado pelo firmware."],
+            hipotese_provavel=["Dispositivo USB sem ATA pass-through, unidade virtual/simulada ou telemetria inacessível."],
+            limitacoes=["Sem acesso aos registradores de hardware, o status de confiabilidade não pode ser afirmado como saudável nem crítico."],
+            acao_sugerida="Proceder com clonagem resiliente para resguardar os dados caso haja lentidão ou sintomas de falha."
+        )
+
     reallocated = raw_attributes.get(5, 0)
     pending = raw_attributes.get(197, 0)
     uncorrectable = raw_attributes.get(198, 0)
@@ -212,18 +240,22 @@ def analyze_smart_data(
 
 
 def query_smart_report_windows(device_number: int, device_path: str, model: str, serial: str) -> SmartReport:
-    """Obtém os contadores de confiabilidade e atributos SMART no Windows."""
+    """Obtém os contadores de confiabilidade e atributos SMART no Windows sem confundir métricas de SO com bad sectors."""
     script = f"""
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
     $phys = Get-PhysicalDisk | Where-Object {{ $_.DeviceId -eq '{device_number}' }} | Select-Object -First 1
     $rel = if ($phys) {{ $phys | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue }} else {{ $null }}
 
-    [PSCustomObject]@{{
-        Temperature = if ($null -ne $rel) {{ $rel.Temperature }} else {{ $null }}
-        ReadErrorsTotal = if ($null -ne $rel) {{ $rel.ReadErrorsTotal }} else {{ 0 }}
-        WriteErrorsTotal = if ($null -ne $rel) {{ $rel.WriteErrorsTotal }} else {{ 0 }}
-        Wear = if ($null -ne $rel) {{ $rel.Wear }} else {{ 0 }}
-    }} | ConvertTo-Json
+    if ($null -eq $rel) {{
+        ""
+    }} else {{
+        [PSCustomObject]@{{
+            Temperature = $rel.Temperature
+            ReadErrorsTotal = $rel.ReadErrorsTotal
+            WriteErrorsTotal = $rel.WriteErrorsTotal
+            Wear = $rel.Wear
+        }} | ConvertTo-Json
+    }}
     """
     cmd = ["powershell", "-NoProfile", "-Command", script]
     creationflags = 0x08000000 if os.name == "nt" else 0
@@ -238,10 +270,15 @@ def query_smart_report_windows(device_number: int, device_path: str, model: str,
         if stdout:
             data = json.loads(stdout)
             temperature = data.get("Temperature")
-            read_err = data.get("ReadErrorsTotal") or 0
-            if read_err > 0:
-                raw_attrs[1] = read_err
-                raw_attrs[197] = read_err
+            read_err = data.get("ReadErrorsTotal")
+            wear = data.get("Wear")
+            # ReadErrorsTotal do Windows StorageReliabilityCounter reflete contadores de leitura do SO,
+            # NÃO deve ser atribuído ao SMART ID 197 (Current Pending Sector).
+            # Mapeamos para SMART ID 1 (Raw Read Error Rate) se presente.
+            if read_err is not None:
+                raw_attrs[1] = int(read_err)
+            if wear is not None and wear > 0:
+                raw_attrs[233] = int(wear)
     except Exception as exc:
         log.debug("Falha na consulta de StorageReliabilityCounter: %s", exc)
 

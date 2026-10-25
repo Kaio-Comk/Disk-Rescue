@@ -641,7 +641,14 @@ class DiskRescueApp:
     def _render_smart_results(self, report):
         temp_str = f"{report.temperature_c} °C" if report.temperature_c else "N/A"
         self.val_temp.config(text=temp_str)
-        self.val_smart_risk.config(text=report.risk_level.value.split()[0])
+        risk_name = report.risk_level.value.split()[0]
+        color_map = {
+            "Verde": "#10b981",
+            "Amarelo": "#f59e0b",
+            "Vermelho": "#ef4444",
+            "Cinza": "#94a3b8",
+        }
+        self.val_smart_risk.config(text=risk_name, fg=color_map.get(risk_name, "#ffffff"))
         self.val_crc_err.config(text=str(report.crc_errors))
         self.val_reallocated.config(text=str(report.reallocated_sectors))
         self.val_pending.config(text=str(report.pending_sectors))

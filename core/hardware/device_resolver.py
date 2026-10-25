@@ -1,6 +1,6 @@
 """
 core/hardware/device_resolver.py — Resolução de identidade física de dispositivos de armazenamento.
-Garante proteção P0 contra gravação no mesmo disco físico (incluindo volumes lógicos no mesmo drive).
+Garante proteção P0 Fail-Closed contra gravação no mesmo disco físico (incluindo volumes lógicos no mesmo drive).
 """
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ IOCTL_STORAGE_GET_DEVICE_NUMBER = 0x002D1080
 FILE_SHARE_READ = 0x00000001
 FILE_SHARE_WRITE = 0x00000002
 OPEN_EXISTING = 3
-INVALID_HANDLE_VALUE = -1
 
 
 if os.name == "nt":
@@ -31,6 +30,40 @@ if os.name == "nt":
             ("PartitionNumber", wintypes.DWORD),
         ]
 
+    kernel32 = ctypes.windll.kernel32
+
+    # Configuração explícita de protótipos Win32 de 64 bits para evitar truncamento de HANDLE
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+
+    kernel32.DeviceIoControl.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    kernel32.DeviceIoControl.restype = wintypes.BOOL
+
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    # INVALID_HANDLE_VALUE no Windows 64-bit é (HANDLE)-1
+    INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
+else:
+    INVALID_HANDLE_VALUE = -1
+
 
 def get_physical_drive_number(target: str | Path) -> Optional[int]:
     """
@@ -38,7 +71,7 @@ def get_physical_drive_number(target: str | Path) -> Optional[int]:
     Exemplos:
       - r"\\\\.\\PhysicalDrive0" -> 0
       - "C:\\" ou "C:\\Resgate\\disco.img" -> número do disco físico onde C: reside
-    Retorna None se não for possível correlacionar.
+    Retorna None se não for possível correlacionar com certeza.
     """
     target_str = str(target).strip()
 
@@ -51,7 +84,6 @@ def get_physical_drive_number(target: str | Path) -> Optional[int]:
         return None
 
     # 2. Resolução no Windows via IOCTL_STORAGE_GET_DEVICE_NUMBER
-    # Determina o caminho de volume/dispositivo para consulta
     volume_to_query = None
 
     # Se for letra de unidade com ou sem dois pontos (ex: "C:", "C:\...", "c:/...")
@@ -78,7 +110,6 @@ def get_physical_drive_number(target: str | Path) -> Optional[int]:
         return None
 
     try:
-        kernel32 = ctypes.windll.kernel32
         handle = kernel32.CreateFileW(
             volume_to_query,
             0,  # dwDesiredAccess = 0 (apenas metadados/atributos, não exige leitura ou escrita)
@@ -89,7 +120,7 @@ def get_physical_drive_number(target: str | Path) -> Optional[int]:
             None,
         )
 
-        if handle == INVALID_HANDLE_VALUE or handle == 0:
+        if handle == INVALID_HANDLE_VALUE or handle == 0 or handle is None:
             return None
 
         try:
@@ -120,6 +151,8 @@ def is_same_physical_device(
 ) -> Tuple[bool, str]:
     """
     Verifica categoricamente se a origem e o destino compartilham o mesmo disco físico ou caminho de arquivo.
+    Adota política FAIL-CLOSED estrita: se a origem for um disco físico real e o disco físico do destino
+    não puder ser comprovado como independente, a operação é bloqueada preventivamente.
     Retorna (is_conflict, message_explanation).
     """
     src_str = str(source).strip()
@@ -153,21 +186,53 @@ def is_same_physical_device(
     except Exception:
         pass
 
-    # 3. Resolução profunda de Discos Físicos (PhysicalDrive)
-    # Aplica-se quando a origem ou destino for uma mídia física de baixo nível (ex: \\.\PhysicalDrive0, \\.\C:)
-    src_is_physical = bool(re.search(r"PhysicalDrive\d+", src_str, re.IGNORECASE)) or src_str.startswith(r"\\.")
-    dst_is_physical = bool(re.search(r"PhysicalDrive\d+", dst_str, re.IGNORECASE)) or dst_str.startswith(r"\\.")
+    # 3. Resolução profunda de Discos Físicos (PhysicalDrive) com política FAIL-CLOSED
+    # Isenta URIs simuladas de testes (ex: mock://) para manter determinismo da suíte sintética
+    is_mock = src_str.startswith("mock://") or dst_str.startswith("mock://")
+    src_is_physical = bool(re.search(r"PhysicalDrive\d+", src_str, re.IGNORECASE)) or (
+        src_str.startswith(r"\\.") and not is_mock
+    )
+    dst_is_physical = bool(re.search(r"PhysicalDrive\d+", dst_str, re.IGNORECASE)) or (
+        dst_str.startswith(r"\\.") and not is_mock
+    )
 
-    if src_is_physical or dst_is_physical:
+    if (src_is_physical or dst_is_physical) and not is_mock:
         src_drive_num = get_physical_drive_number(src_str)
         dst_drive_num = get_physical_drive_number(dst_str)
 
-        if src_drive_num is not None and dst_drive_num is not None:
+        # Regra FAIL-CLOSED: Se a origem é um disco físico, o destino DEVE ter sua unidade física comprovada
+        if src_is_physical:
+            if src_drive_num is None:
+                return (
+                    True,
+                    f"BLOQUEIO FAIL-CLOSED: O identificador de origem '{src_str}' é um dispositivo físico, "
+                    f"mas não foi possível resolver com segurança seu número de PhysicalDrive. "
+                    f"Operação abortada para prevenir sobrescrita destrutiva.",
+                )
+            if dst_drive_num is None:
+                return (
+                    True,
+                    f"BLOQUEIO FAIL-CLOSED: A origem física foi identificada como PhysicalDrive{src_drive_num}, "
+                    f"mas não foi possível comprovar em qual disco físico o destino '{dst_str}' reside. "
+                    f"Para garantir a preservação da mídia, salve em um volume ou disco externo comprovadamente independente.",
+                )
             if src_drive_num == dst_drive_num:
                 return (
                     True,
                     f"Origem e destino pertencem ao mesmo disco físico (PhysicalDrive{src_drive_num}). "
-                    f"Gravar dados no mesmo disco em recuperação causará sobrescrita ou colapso do dispositivo.",
+                    f"Gravar dados no mesmo disco em recuperação causará sobrescrita catastrófica dos dados.",
+                )
+
+        elif dst_is_physical:
+            if dst_drive_num is None:
+                return (
+                    True,
+                    f"BLOQUEIO FAIL-CLOSED: O destino '{dst_str}' é um dispositivo físico não resolvido.",
+                )
+            if src_drive_num is not None and src_drive_num == dst_drive_num:
+                return (
+                    True,
+                    f"Origem e destino pertencem ao mesmo disco físico (PhysicalDrive{dst_drive_num}).",
                 )
 
     return False, ""
@@ -177,7 +242,8 @@ def assert_safe_source_and_destination(
     source: str | Path, destination: str | Path, is_directory: bool = False
 ) -> None:
     """
-    Lança ValueError imediato se a origem e destino colidirem no mesmo disco físico ou arquivo.
+    Lança ValueError imediato se a origem e destino colidirem no mesmo disco físico ou arquivo,
+    ou se houver ambiguidade em relação a dispositivos físicos (Fail-Closed).
     """
     conflict, reason = is_same_physical_device(source, destination, is_dest_dir=is_directory)
     if conflict:

@@ -181,3 +181,41 @@ def test_carver_structural_integrity_verification(tmp_path: Path):
     broken_pdf = out_dir / "broken.pdf"
     broken_pdf.write_bytes(b"%PDF-1.4\nincomplete data without eof")
     assert FileCarver.verify_file_integrity(broken_pdf, "PDF") is False
+
+    # 4. PNG válido vs truncado/inválido
+    valid_png = out_dir / "valid.png"
+    # Header de 8 bytes + chunk IHDR de 25 bytes + IEND de 12 bytes
+    ihdr_chunk = struct.pack(">I", 13) + b"IHDR" + (b"\x00" * 13) + (b"\x00" * 4)
+    iend_chunk = struct.pack(">I", 0) + b"IEND" + (b"\x00" * 4)
+    valid_png.write_bytes(b"\x89PNG\r\n\x1a\n" + ihdr_chunk + iend_chunk)
+    assert FileCarver.verify_file_integrity(valid_png, "PNG") is True
+
+    broken_png = out_dir / "broken.png"
+    broken_png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"CORRUPTED_WITHOUT_IHDR_OR_IEND")
+    assert FileCarver.verify_file_integrity(broken_png, "PNG") is False
+
+    # 5. JPEG válido vs inválido
+    valid_jpeg = out_dir / "valid.jpg"
+    valid_jpeg.write_bytes(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00" + b"\xff\xd9")
+    assert FileCarver.verify_file_integrity(valid_jpeg, "JPEG") is True
+
+    broken_jpeg = out_dir / "broken.jpg"
+    broken_jpeg.write_bytes(b"\xff\xd8\xff\x00" + b"NO_EOI_FOOTER")
+    assert FileCarver.verify_file_integrity(broken_jpeg, "JPEG") is False
+
+
+def test_physical_drive_conflict_fail_closed_when_unresolved(monkeypatch):
+    """
+    P0 Teste Crítico Fail-Closed: Quando a origem for um disco físico e o destino não
+    puder ter sua identidade física comprovada com certeza absoluta, a operação DEVE ser bloqueada.
+    """
+    def mock_unresolved(path):
+        p = str(path).lower()
+        if "physicaldrive0" in p:
+            return 0
+        return None
+
+    monkeypatch.setattr("core.hardware.device_resolver.get_physical_drive_number", mock_unresolved)
+
+    with pytest.raises(ValueError, match="BLOQUEIO FAIL-CLOSED"):
+        assert_safe_source_and_destination(r"\\.\PhysicalDrive0", r"X:\Imagens\disco.img")

@@ -1,7 +1,8 @@
 """
 core/recovery/resilient_clone.py — Motor de clonagem resiliente em duas fases com mapa de resgate (estilo ddrescue).
 Permite resgatar discos com bad sectors sem travar o sistema, pulando áreas danificadas e raspando dados cirurgicamente.
-Garante contabilização estrita de 100% dos LBAs sem lacunas silenciosas e retomada atômica e confiável.
+Garante contabilização estrita de 100% dos LBAs sem lacunas silenciosas, persistência atômica,
+durabilidade com fsync e validação rigorosa de integridade e parâmetros na retomada (resume).
 """
 from __future__ import annotations
 
@@ -52,7 +53,7 @@ class CloneMap:
     def mark_range(self, mark_start: int, count: int, new_status: str):
         """
         Atualiza o estado de um intervalo de LBAs com precisão matemática,
-        dividindo e fundindo blocos adjacentes para garantir zero lacunas.
+        dividindo e fundindo blocos adjacentes para garantir zero lacunas e contiguidade estrita.
         """
         if count <= 0:
             return
@@ -96,7 +97,10 @@ class CloneMap:
         return [(b.start_lba, b.sector_count) for b in self.blocks if b.status == "*"]
 
     def save_map(self, map_path: Path):
-        """Persiste o mapa atomicamente (gravação temporária + replace) para evitar corrupção em quedas de energia."""
+        """
+        Persiste o mapa atomicamente (gravação temporária + fsync + os.replace)
+        garantindo durabilidade física contra quedas de energia.
+        """
         self.recalculate_counts()
         data = {
             "version": "2.0",
@@ -112,7 +116,13 @@ class CloneMap:
         }
         map_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = map_path.with_suffix(".map.tmp")
-        tmp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, indent=2))
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
         os.replace(tmp_path, map_path)
 
     @classmethod
@@ -123,7 +133,11 @@ class CloneMap:
         expected_output: Path,
         expected_sectors: int
     ) -> CloneMap | None:
-        """Carrega e valida rigorosamente se o mapa pertence à mesma origem e destino."""
+        """
+        Carrega e valida rigorosamente se o mapa pertence à mesma origem e destino,
+        rejeitando mapas com metadados ausentes, blocos malformados ou incompatibilidade
+        com a imagem física em disco.
+        """
         try:
             if not map_path.exists():
                 return None
@@ -133,22 +147,60 @@ class CloneMap:
                 log.warning("Mapa rejeitado: total_sectors incompatível (%s != %s)", data.get("total_sectors"), expected_sectors)
                 return None
 
+            # Metadados de dispositivo e imagem são obrigatórios e não podem ser vazios
+            map_dev = data.get("device_path")
+            map_out = data.get("output_image")
+            if not map_dev or not map_out:
+                log.warning("Mapa rejeitado: metadados 'device_path' ou 'output_image' ausentes.")
+                return None
+
             clean_exp_dev = expected_device.replace("\\\\.\\", "").replace("\\", "/").strip().lower()
-            clean_map_dev = str(data.get("device_path", "")).replace("\\\\.\\", "").replace("\\", "/").strip().lower()
-            if clean_exp_dev and clean_map_dev and clean_exp_dev != clean_map_dev:
+            clean_map_dev = str(map_dev).replace("\\\\.\\", "").replace("\\", "/").strip().lower()
+            if clean_exp_dev != clean_map_dev:
                 log.warning("Mapa rejeitado: dispositivo de origem diferente (%s != %s)", clean_map_dev, clean_exp_dev)
                 return None
 
             clean_exp_out = str(expected_output.resolve()).replace("\\", "/").lower()
-            clean_map_out = str(data.get("output_image", "")).replace("\\", "/").lower()
-            if clean_exp_out and clean_map_out and clean_exp_out != clean_map_out:
+            clean_map_out = str(map_out).replace("\\", "/").lower()
+            if clean_exp_out != clean_map_out:
                 log.warning("Mapa rejeitado: arquivo de destino diferente (%s != %s)", clean_map_out, clean_exp_out)
                 return None
 
-            blocks = [CloneBlock(**b) for b in data.get("blocks", [])]
+            blocks_raw = data.get("blocks", [])
+            if not blocks_raw:
+                log.warning("Mapa rejeitado: lista de blocos vazia.")
+                return None
+
+            # Validação rigorosa dos blocos (cobertura total contígua, sem lacunas, contagens > 0)
+            blocks = []
+            expected_start = 0
+            for b in blocks_raw:
+                start = b.get("start_lba", -1)
+                count = b.get("sector_count", 0)
+                status = b.get("status", "")
+                if count <= 0 or start != expected_start or status not in {"?", "+", "*", "-"}:
+                    log.warning("Mapa rejeitado: bloco inconsistente ou com lacuna (%s)", b)
+                    return None
+                blocks.append(CloneBlock(start, count, status))
+                expected_start += count
+
+            if expected_start != expected_sectors:
+                log.warning("Mapa rejeitado: cobertura total de setores (%d) difere de total_sectors (%d)", expected_start, expected_sectors)
+                return None
+
+            # Verificação de coerência com o arquivo físico de imagem
+            rescued_in_map = sum(b.sector_count for b in blocks if b.status == "+")
+            if rescued_in_map > 0:
+                if not expected_output.exists() or expected_output.stat().st_size == 0:
+                    log.warning(
+                        "Mapa rejeitado: o mapa indica %d setores recuperados, mas o arquivo de imagem '%s' não existe ou está vazio.",
+                        rescued_in_map, expected_output
+                    )
+                    return None
+
             cmap = cls(
-                device_path=data.get("device_path", expected_device),
-                output_image=data.get("output_image", str(expected_output)),
+                device_path=str(map_dev),
+                output_image=str(expected_output),
                 total_sectors=expected_sectors,
                 sector_size=data.get("sector_size", SECTOR_SIZE),
                 blocks=blocks
@@ -197,6 +249,10 @@ class ResilientCloner:
         skip_step_sectors: int = 2048,  # 1 MB de salto após erro
         map_path: Path | None = None
     ):
+        # Validação estrita de parâmetros de execução (impedir loops infinitos ou parâmetros não positivos)
+        if total_sectors <= 0 or block_sectors <= 0 or skip_step_sectors <= 0:
+            raise ValueError("Os parâmetros total_sectors, block_sectors e skip_step_sectors devem ser estritamente positivos (> 0).")
+
         self.device_path = device_path
         self.output_image_path = Path(output_image_path)
         self.total_sectors = total_sectors
@@ -205,7 +261,7 @@ class ResilientCloner:
         self.map_path = map_path or self.output_image_path.with_suffix(".map")
         self.cancel_requested = False
 
-        # Validação de segurança P0: Impedir categoricamente que origem e destino coincidam ou compartilhem o mesmo disco físico
+        # Validação de segurança P0 Fail-Closed: Impedir gravação no mesmo disco físico
         assert_safe_source_and_destination(self.device_path, self.output_image_path)
 
         # Verifica espaço em disco disponível no destino
@@ -253,7 +309,7 @@ class ResilientCloner:
         """Executa a clonagem em 2 fases: varredura rápida com saltos e raspagem cirúrgica setor a setor."""
         self.output_image_path.parent.mkdir(parents=True, exist_ok=True)
         t_start = time.time()
-        last_cb_time = 0.0  # Permite que o primeiro callback dispare imediatamente
+        last_cb_time = 0.0
         last_save_time = t_start
         bytes_rescued_in_run = 0
         iteration_count = 0
@@ -267,6 +323,10 @@ class ResilientCloner:
                 dst.seek(target_size - 1)
                 dst.write(b"\x00")
                 dst.flush()
+                try:
+                    os.fsync(dst.fileno())
+                except OSError:
+                    pass
 
         # Leitor customizado ou leitura nativa direta do dispositivo (abertura estrita somente leitura)
         def default_reader(lba: int, count: int) -> bytes:
@@ -304,7 +364,7 @@ class ResilientCloner:
 
                     except Exception as exc:
                         log.warning("Erro de leitura no LBA %d..%d: %s. Pulando...", cur_lba, cur_lba + count, exc)
-                        # Salta para afastar cabeças magnéticas
+                        # Salta para afastar cabeças magnéticas da área degradada
                         jump = min(self.skip_step_sectors, range_end - cur_lba)
                         # REGRA CRÍTICA P0: Todos os setores saltados são marcados como '*' (pulados)
                         # para serem raspados na Fase 2, garantindo zero omissão de dados.
@@ -314,6 +374,11 @@ class ResilientCloner:
                     iteration_count += 1
                     now = time.time()
                     if now - last_save_time >= 2.0:
+                        dst_file.flush()
+                        try:
+                            os.fsync(dst_file.fileno())
+                        except OSError:
+                            pass
                         self.clone_map.save_map(self.map_path)
                         last_save_time = now
 
@@ -330,6 +395,11 @@ class ResilientCloner:
                         ))
                         last_cb_time = now
 
+            dst_file.flush()
+            try:
+                os.fsync(dst_file.fileno())
+            except OSError:
+                pass
             self.clone_map.save_map(self.map_path)
 
             # ── FASE 2: RASPAGEM CIRÚRGICA DE TODOS OS SETORES PULADOS ───────────
@@ -361,6 +431,11 @@ class ResilientCloner:
                         iteration_count += 1
                         now = time.time()
                         if now - last_save_time >= 2.0:
+                            dst_file.flush()
+                            try:
+                                os.fsync(dst_file.fileno())
+                            except OSError:
+                                pass
                             self.clone_map.save_map(self.map_path)
                             last_save_time = now
 
@@ -378,6 +453,10 @@ class ResilientCloner:
                             last_cb_time = now
 
             dst_file.flush()
+            try:
+                os.fsync(dst_file.fileno())
+            except OSError:
+                pass
 
         self.clone_map.save_map(self.map_path)
         self.clone_map.recalculate_counts()
