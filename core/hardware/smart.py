@@ -28,7 +28,7 @@ class SmartAttribute:
     current: Optional[int] = None
     worst: Optional[int] = None
     threshold: Optional[int] = None
-    raw_value: int = 0
+    raw_value: Optional[int] = None
     is_failing: bool = False
     description: str = ""
 
@@ -80,20 +80,28 @@ SMART_DEFINITIONS = {
 # Atributos cujo valor bruto > 0 indica falha ou degradação nos esquemas padrão ATA
 AUXILIARY_ERROR_COUNTERS = {181, 182, 183, 191, 200}
 
+# Atributos de integridade/erros conhecidos capazes de sustentar evidência complementar de saúde (ID 9 excluído pois mede apenas tempo ligado)
+INTEGRITY_SUPPORTING_IDS = {1, 10, 184, 187, 188, 196, 198, 199}
+
+
+def _is_valid_int(val: object) -> bool:
+    """Retorna True somente se val for um int genuíno (excluindo bool)."""
+    return isinstance(val, int) and not isinstance(val, bool)
+
 
 def _is_known_zero(val: Optional[int]) -> bool:
     """Retorna True somente se o atributo foi efetivamente consultado e seu valor é exatamente zero."""
-    return val is not None and val == 0
+    return _is_valid_int(val) and val == 0
 
 
 def _is_positive(val: Optional[int]) -> bool:
     """Retorna True somente se o atributo foi efetivamente consultado e seu valor é > 0."""
-    return val is not None and val > 0
+    return _is_valid_int(val) and val > 0
 
 
 def _fmt_counter(val: Optional[int]) -> str:
     """Formata contador distinguindo zero consultado de valor ausente (N/D)."""
-    return str(val) if val is not None else "N/D (não consultado)"
+    return str(val) if _is_valid_int(val) else "N/D (não consultado)"
 
 
 def analyze_smart_data(
@@ -101,17 +109,17 @@ def analyze_smart_data(
     device_path: str,
     model: str,
     serial: str,
-    raw_attributes: Dict[int, int],
+    raw_attributes: Dict[int, Optional[int] | dict],
     temperature_c: Optional[int] = None,
-    normalized_attributes: Optional[Dict[int, tuple[int, int, int]]] = None,
+    normalized_attributes: Optional[Dict[int, tuple[Optional[int], Optional[int], Optional[int]]]] = None,
     windows_reliability: Optional[Dict[str, int]] = None,
     is_usb: bool = False
 ) -> SmartReport:
     """
     Interpreta valores SMART disponibilizados pelo dispositivo usando regras heurísticas transparentes.
-    - Não preenche valores normalizados fictícios nem trata valores ausentes (None) como zero.
+    - Não preenche valores normalizados fictícios nem trata valores ausentes (None) ou inválidos como zero.
     - Mantém métricas do Windows separadas dos atributos SMART de hardware.
-    - Nunca declara estado GREEN sem evidências suficientes e sem ausência comprovada de alertas conhecidos.
+    - Nunca declara estado GREEN sem evidências de integridade suficientes (ID 9 não conta como evidência de integridade).
     """
     if not raw_attributes:
         evidencias = ["Nenhum atributo S.M.A.R.T. de hardware do fabricante retornado."]
@@ -172,21 +180,75 @@ def analyze_smart_data(
             acao_sugerida=rec_text
         )
 
-    norm_map: Dict[int, tuple[Optional[int], Optional[int], Optional[int]]] = dict(normalized_attributes or {})
+    evidencias: List[str] = []
+    hipoteses: List[str] = []
+    limitacoes: List[str] = [
+        "A classificação utiliza regras heurísticas sobre os contadores S.M.A.R.T. disponibilizados, não representando probabilidade estatística calibrada.",
+        "Fabricantes diferentes (ex: Seagate, WD, Toshiba, SSDs) podem codificar campos brutos (especialmente IDs 1, 9 e 188) em formatos proprietários.",
+        "A ausência de erros registrados nos contadores consultados não garante ausência total de defeitos físicos não rastreados pelo firmware."
+    ]
+    messages: List[str] = []
+    has_malformed_telemetry = False
+
+    raw_norm_input: Dict[int, object] = dict(normalized_attributes or {})
+    norm_map: Dict[int, tuple[Optional[int], Optional[int], Optional[int]]] = {}
     raw_map: Dict[int, Optional[int]] = {}
+
     for aid, val in raw_attributes.items():
         if isinstance(val, dict):
             r_v = val.get("raw", val.get("raw_value", None))
-            raw_map[aid] = int(r_v) if r_v is not None else None
+            if r_v is None:
+                raw_map[aid] = None
+            elif _is_valid_int(r_v) and r_v >= 0:
+                raw_map[aid] = r_v
+            else:
+                raw_map[aid] = None
+                has_malformed_telemetry = True
+                evidencias.append(f"Atributo ID {aid} possui valor bruto malformado ou negativo ({r_v!r}); tratado como N/D.")
+                limitacoes.append(f"Valor bruto inválido no atributo ID {aid} ({r_v!r}) descartado para evitar falso positivo/negativo.")
+
             c_v = val.get("value", val.get("current", None))
             w_v = val.get("worst", None)
             t_v = val.get("thresh", val.get("threshold", None))
             if any(x is not None for x in (c_v, w_v, t_v)):
-                norm_map[aid] = (c_v, w_v, t_v)
-        elif isinstance(val, int):
+                raw_norm_input[aid] = (c_v, w_v, t_v)
+        elif val is None:
+            raw_map[aid] = None
+        elif _is_valid_int(val) and val >= 0:
             raw_map[aid] = val
         else:
             raw_map[aid] = None
+            has_malformed_telemetry = True
+            evidencias.append(f"Atributo ID {aid} possui valor bruto inválido ({val!r}); tratado como N/D (não convertido para zero).")
+            limitacoes.append(f"Valor bruto malformado no atributo ID {aid} ({val!r}) impede atestar integridade plena.")
+
+    # Validação rigorosa das tuplas de atributos normalizados (current, worst, threshold)
+    for aid, n_tuple in raw_norm_input.items():
+        if not isinstance(n_tuple, (tuple, list)) or len(n_tuple) != 3:
+            has_malformed_telemetry = True
+            evidencias.append(f"Atributo normalizado ID {aid} malformado ({n_tuple!r}); ignorado.")
+            limitacoes.append(f"Estrutura normalizada inválida para ID {aid}.")
+            continue
+        c_v, w_v, t_v = n_tuple
+        tuple_valid = True
+        if c_v is not None and (not _is_valid_int(c_v) or c_v <= 0 or c_v > 255):
+            tuple_valid = False
+        if w_v is not None and (not _is_valid_int(w_v) or w_v <= 0 or w_v > 255):
+            tuple_valid = False
+        if t_v is not None and (not _is_valid_int(t_v) or t_v < 0 or t_v > 255):
+            tuple_valid = False
+        if not tuple_valid:
+            has_malformed_telemetry = True
+            evidencias.append(
+                f"Valores normalizados impossíveis ou fora da faixa ATA (1..255 / 0..255) no ID {aid}: "
+                f"current={c_v!r}, worst={w_v!r}, threshold={t_v!r}."
+            )
+            limitacoes.append(
+                f"Valores normalizados malformados no ID {aid} foram rejeitados e impedem classificação saudável automática."
+            )
+            norm_map[aid] = (None, None, None)
+        else:
+            norm_map[aid] = (c_v, w_v, t_v)
 
     raw_attributes = raw_map
     normalized_attributes = norm_map
@@ -202,15 +264,6 @@ def analyze_smart_data(
     command_timeout = raw_attributes.get(188, None)
     realloc_events = raw_attributes.get(196, None)
     raw_read_err = raw_attributes.get(1, None)
-
-    evidencias: List[str] = []
-    hipoteses: List[str] = []
-    limitacoes: List[str] = [
-        "A classificação utiliza regras heurísticas sobre os contadores S.M.A.R.T. disponibilizados, não representando probabilidade estatística calibrada.",
-        "Fabricantes diferentes (ex: Seagate, WD, Toshiba, SSDs) podem codificar campos brutos (especialmente IDs 1, 9 e 188) em formatos proprietários.",
-        "A ausência de erros registrados nos contadores consultados não garante ausência total de defeitos físicos não rastreados pelo firmware."
-    ]
-    messages: List[str] = []
 
     is_red = False
     is_yellow = False
@@ -459,27 +512,26 @@ def analyze_smart_data(
                 f"⚠️ ATRIBUTO ESPECÍFICO NÃO NULO: ID {up_id} = {raw_attributes[up_id]} observado sem decodificação padronizada."
             )
 
-    # Determinação rigorosa do nível de risco:
+    # Determinação rigorosa do nível de risco (Seções 10 e 11):
     # O estado GREEN só pode ser atribuído quando:
     # 1. ID 5 e ID 197 foram efetivamente consultados e ambos valem 0;
     # 2. Se ID 198 foi consultado, vale 0;
-    # 3. Pelo menos mais um indicador de operação/integridade (ex: ID 1, 9, 10, 184, 187, 188, 196, 198, 199) foi consultado
-    #    OU todos os atributos presentes estão zerados e sem contradições;
-    # 4. Nenhum contador de erro crítico ou auxiliar é > 0 e nenhum alerta (RED/YELLOW) foi acionado.
+    # 3. Pelo menos mais um indicador de INTEGRIDADE (INTEGRITY_SUPPORTING_IDS = {1, 10, 184, 187, 188, 196, 198, 199})
+    #    foi efetivamente consultado com valor válido — ID 9 (Power-On Hours) NÃO conta como evidência de integridade;
+    # 4. Nenhum atributo consultado contém valor nulo/malformado ou fora da faixa normalizada;
+    # 5. Nenhum contador de erro crítico ou auxiliar é > 0 e nenhum alerta (RED/YELLOW) foi acionado.
     critical_counters = [1, 5, 10, 181, 182, 183, 184, 187, 188, 191, 196, 197, 198, 199, 200]
     has_any_critical_errors = any(_is_positive(raw_attributes.get(k)) for k in critical_counters)
 
-    # Se houver atributos desconhecidos > 0 e apenas {5: 0, 197: 0}, registramos a limitação
-    unknown_positive = [aid for aid in unknown_ids if _is_positive(raw_attributes.get(aid))]
     if unknown_positive and set(raw_attributes.keys()) == ({5, 197} | set(unknown_positive)):
         evidencias.append(
             f"Indicadores não interpretados com valor positivo: {', '.join(f'ID {k}={raw_attributes[k]}' for k in sorted(unknown_positive))}."
         )
 
-    # IDs 5 e 197 são condição necessária, mas exigimos também um terceiro atributo conhecido saudável
-    # (ou conjunto padrão de telemetria sem indicadores desconhecidos positivos suspeitos)
-    known_supporting_ids = {1, 9, 10, 184, 187, 188, 196, 198, 199}
-    has_supporting_telemetry = any(k in raw_attributes for k in known_supporting_ids)
+    has_supporting_telemetry = any(
+        _is_valid_int(raw_attributes.get(k)) for k in INTEGRITY_SUPPORTING_IDS
+    )
+    has_any_none_raw = any(v is None for v in raw_attributes.values())
 
     has_sufficient_health_evidence = (
         _is_known_zero(reallocated)
@@ -488,6 +540,8 @@ def analyze_smart_data(
         and has_supporting_telemetry
         and not has_any_critical_errors
         and not unknown_positive
+        and not has_malformed_telemetry
+        and not has_any_none_raw
         and not is_red
         and not is_yellow
     )
@@ -511,24 +565,28 @@ def analyze_smart_data(
             f"Setores remapeados (ID 5) = 0 e setores pendentes (ID 197) = 0 confirmados ({', '.join(queried_zeros)})."
         )
         evidencias.append("Zero erros de leitura, remapeamento ou comunicação nos atributos efetivamente consultados.")
-        hipoteses.append("Mídia operando dentro dos parâmetros nominais para as regras heurísticas e atributos monitorados.")
-        messages.append("Nenhum erro de leitura, remapeamento ou comunicação física detectado nos atributos consultados.")
+        hipoteses.append("Mídia operando dentro dos parâmetros monitorados avaliados pelas regras heurísticas (não constitui garantia absoluta contra falhas não rastreadas).")
+        messages.append("Saúde monitorada dentro dos parâmetros avaliados: nenhum erro de leitura, remapeamento ou comunicação física nos contadores consultados.")
         recommendation = (
-            "O disco apresenta parâmetros monitorados saudáveis e estáveis segundo as evidências disponíveis. "
+            "O disco apresenta parâmetros monitorados saudáveis segundo os atributos S.M.A.R.T. avaliados (não representa garantia absoluta de ausência de defeitos físicos). "
             "Recomenda-se realizar snapshot de segurança antes de qualquer intervenção estrutural ou particionamento."
         )
     else:
         risk = SmartRiskLevel.UNKNOWN
         if not (_is_known_zero(reallocated) and _is_known_zero(pending)):
             evidencias.append(
-                "Nenhum atributo crítico de saúde física completo: telemetria não contém simultaneamente os contadores essenciais de superfície (IDs 5 e 197)."
+                "Nenhum atributo crítico de saúde física completo: telemetria não contém simultaneamente os contadores essenciais de superfície (IDs 5 e 197) com valores válidos."
+            )
+        elif not has_supporting_telemetry:
+            evidencias.append(
+                "Apenas IDs 5 e 197 isolados (ou acompanhados somente de ID 9 Power-On Hours) não constituem evidência de integridade suficiente para declarar estado saudável."
             )
         else:
             evidencias.append(
-                "Apenas IDs 5 e 197 isolados (ou acompanhados de atributos desconhecidos não interpretados) não constituem evidência suficiente para atestar saúde integral."
+                "Presença de atributos não interpretados, ausentes (N/D) ou valores malformados impede atestar saúde integral."
             )
         hipoteses.append("Dados S.M.A.R.T. insuficientes para comprovar de forma conclusiva a integridade global do disco.")
-        limitacoes.append("A ausência de cobertura suficiente de contadores impede declarar estado saudável (Verde).")
+        limitacoes.append("A ausência de cobertura suficiente de contadores de integridade impede declarar estado saudável (Verde).")
         messages.append("Dados S.M.A.R.T. insuficientes para determinar com segurança o estado saudável do disco.")
         recommendation = "Estado de integridade indeterminado pelas evidências S.M.A.R.T. Execute varredura de superfície ou clonagem preventiva."
 

@@ -506,4 +506,80 @@ def test_gui_cancellation_and_window_close_waits_for_active_operations(mock_gui,
     app.closing_requested = False
 
 
+def test_gui_clone_existing_image_prompts_confirmation_and_preserves_on_decline(mock_gui, monkeypatch, tmp_path):
+    """
+    Seção 3 (P0): Valida que a GUI exige confirmação explícita (messagebox.askyesno) explicando que os dados
+    existentes podem ser sobrescritos quando a imagem já existe sem mapa ou com mapa incompatível,
+    e preserva a imagem intacta se o operador recusar.
+    """
+    import time
+    import tkinter as tk
+    from tkinter import messagebox
+
+    app, root = mock_gui
+    monkeypatch.setattr("gui.app.assert_safe_source_and_destination", lambda *a, **kw: None)
+    monkeypatch.setattr("core.recovery.resilient_clone.assert_safe_source_and_destination", lambda *a, **kw: None)
+
+    src_img = tmp_path / "gui_src_ovw.bin"
+    src_img.write_bytes(b"\xAA" * 4096)
+
+    existing_dst = tmp_path / "existing_target.img"
+    original_bytes = b"EXISTING_RECOVERY_DATA_" * 100
+    existing_dst.write_bytes(original_bytes)
+
+    app.selected_disk = DiskInfo(
+        number=88,
+        device_path=str(src_img),
+        friendly_name="GUI Overwrite Test Disk",
+        serial_number="OVW88",
+        size_bytes=4096,
+        bus_type="SATA",
+        partition_style="GPT",
+        media_type="SSD",
+        health_status="Healthy",
+        operational_status="OK",
+        temperature=30,
+        read_errors=0,
+        write_errors=0,
+        wear=None,
+        is_read_only=False,
+        is_boot=False,
+        is_system=False,
+        can_open_raw=True,
+    )
+    app.txt_dest_image.delete(0, tk.END)
+    app.txt_dest_image.insert(0, str(existing_dst))
+
+    prompts = []
+
+    def decline_overwrite(title, message):
+        prompts.append((title, message))
+        return False
+
+    monkeypatch.setattr(messagebox, "askyesno", decline_overwrite)
+
+    # 1. Operador recusa sobrescrita -> imagem permanece byte a byte intacta
+    app._start_clone()
+    assert len(prompts) == 1
+    assert "PODEM SER SOBRESCRITOS" in prompts[0][1]
+    assert existing_dst.read_bytes() == original_bytes
+    assert app.cloner_instance is None
+    assert str(app.btn_start_clone.cget("state")) == "normal"
+
+    # 2. Operador autoriza sobrescrita -> clonagem prossegue e grava nova imagem
+    monkeypatch.setattr(messagebox, "askyesno", lambda title, msg: True)
+    monkeypatch.setattr(messagebox, "showinfo", lambda *a, **kw: None)
+    app._start_clone()
+
+    deadline = time.time() + 3.0
+    while app.cloner_instance is not None and time.time() < deadline:
+        app._process_pending_messages()
+        root.update()
+        time.sleep(0.02)
+    app._process_pending_messages()
+
+    assert existing_dst.read_bytes() == b"\xAA" * 4096
+
+
+
 

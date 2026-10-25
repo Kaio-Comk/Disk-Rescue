@@ -485,4 +485,398 @@ def test_cloner_detects_corrupted_destination_readback_and_rolls_back_memory_map
     assert cloner.clone_map.rescued_sectors == 0
 
 
+def test_cloner_blocks_existing_image_without_map_or_with_invalid_map(tmp_path: Path):
+    """
+    Seção 3 (P0):
+    - Imagem existente sem mapa: bloquear e preservar imagem byte a byte inalterada.
+    - Imagem existente com mapa malformado: bloquear, preservar imagem e mapa intactos.
+    - Imagem existente com metadados de outro dispositivo: bloquear, preservar imagem e mapa intactos.
+    - Reinicialização explícita (allow_overwrite=True): permitir somente depois da autorização.
+    """
+    total_sectors = 16
+    dst_img = tmp_path / "valuable_recovery.img"
+    map_file = tmp_path / "valuable_recovery.map"
+
+    precious_bytes = b"PRECIOUS_RECOVERED_DATA_" * ((total_sectors * SECTOR_SIZE) // 24)
+    precious_bytes += b"\x99" * ((total_sectors * SECTOR_SIZE) - len(precious_bytes))
+    dst_img.write_bytes(precious_bytes)
+
+    # 1. Imagem existente sem mapa -> deve recusar com FileExistsError
+    with pytest.raises(FileExistsError, match="já existe, mas o arquivo de mapa"):
+        ResilientCloner(
+            device_path="mock://source_dev",
+            output_image_path=dst_img,
+            total_sectors=total_sectors,
+            map_path=map_file,
+        )
+    assert dst_img.read_bytes() == precious_bytes
+
+    # 2. Imagem existente com mapa malformado -> bloquear e não apagar o mapa nem tocar na imagem
+    malformed_map_content = "{ invalid json map content !!!"
+    map_file.write_text(malformed_map_content, encoding="utf-8")
+    with pytest.raises(ValueError, match="inválido, corrompido ou incompatível"):
+        ResilientCloner(
+            device_path="mock://source_dev",
+            output_image_path=dst_img,
+            total_sectors=total_sectors,
+            map_path=map_file,
+        )
+    assert dst_img.read_bytes() == precious_bytes
+    assert map_file.read_text(encoding="utf-8") == malformed_map_content
+
+    # 3. Imagem existente com mapa de outro dispositivo -> bloquear e manter ambos intactos
+    other_dev_map = {
+        "version": "2.1",
+        "device_path": "mock://other_different_drive",
+        "output_image": str(dst_img),
+        "total_sectors": total_sectors,
+        "sector_size": SECTOR_SIZE,
+        "blocks": [{"start_lba": 0, "sector_count": total_sectors, "status": "+"}],
+    }
+    map_file.write_text(json.dumps(other_dev_map), encoding="utf-8")
+    with pytest.raises(ValueError, match="inválido, corrompido ou incompatível"):
+        ResilientCloner(
+            device_path="mock://source_dev",
+            output_image_path=dst_img,
+            total_sectors=total_sectors,
+            map_path=map_file,
+        )
+    assert dst_img.read_bytes() == precious_bytes
+
+    # 4. Reinicialização explícita autorizada (allow_overwrite=True)
+    cloner_authorized = ResilientCloner(
+        device_path="mock://source_dev",
+        output_image_path=dst_img,
+        total_sectors=total_sectors,
+        block_sectors=8,
+        skip_step_sectors=8,
+        map_path=map_file,
+        allow_overwrite=True,
+    )
+    # Antes de run(), a imagem e o mapa antigos continuam intocados
+    assert dst_img.read_bytes() == precious_bytes
+    res = cloner_authorized.run(reader_fn=lambda lba, count: b"\xCC" * (count * SECTOR_SIZE))
+    assert res.success is True
+    assert res.fully_recovered is True
+    assert dst_img.read_bytes() == b"\xCC" * (total_sectors * SECTOR_SIZE)
+
+
+def test_cloner_detects_replaced_image_file_on_resume(tmp_path: Path):
+    """
+    Seção 3/4 (P0): Detecta se a imagem existente foi substituída por outro arquivo de mesmo tamanho
+    durante a retomada (via hash SHA-256 de ancoragem no mapa) e recusa sem sobrescrever.
+    """
+    total_sectors = 20
+    dst_img = tmp_path / "anchor_test.img"
+    map_file = tmp_path / "anchor_test.map"
+
+    cloner1 = ResilientCloner(
+        device_path="mock://anchor_dev",
+        output_image_path=dst_img,
+        total_sectors=total_sectors,
+        block_sectors=5,
+        skip_step_sectors=5,
+        map_path=map_file,
+    )
+
+    def stop_early(stats):
+        if stats.rescued_sectors >= 5:
+            cloner1.cancel()
+
+    res1 = cloner1.run(progress_cb=stop_early, reader_fn=lambda lba, count: b"\x11" * (count * SECTOR_SIZE))
+    assert res1.success is False
+    assert map_file.exists()
+
+    # Substitui o arquivo de imagem por outro arquivo com exatamente o mesmo tamanho (20 * 512 bytes), mas conteúdo diferente
+    foreign_file_bytes = b"\xEE" * (total_sectors * SECTOR_SIZE)
+    dst_img.write_bytes(foreign_file_bytes)
+
+    with pytest.raises(ValueError, match="inválido, corrompido ou incompatível"):
+        ResilientCloner(
+            device_path="mock://anchor_dev",
+            output_image_path=dst_img,
+            total_sectors=total_sectors,
+            map_path=map_file,
+        )
+    # Garante que o arquivo substituído permanece byte a byte inalterado
+    assert dst_img.read_bytes() == foreign_file_bytes
+
+
+def test_cloner_rejects_wrong_image_sizes_before_any_write(tmp_path: Path):
+    """
+    Seção 4 (P0):
+    - Imagem existente menor que o esperado sem retomada válida: rejeitar antes da escrita.
+    - Imagem existente maior que o esperado: rejeitar antes da escrita (nunca truncar silenciosamente).
+    - Imagem existente com tamanho incompatível na retomada: rejeitar antes da escrita.
+    """
+    total_sectors = 10
+    dst_img = tmp_path / "sized.img"
+    map_file = tmp_path / "sized.map"
+
+    # 1. Imagem maior que o esperado (20 setores em vez de 10) sem mapa
+    oversized_bytes = b"\x77" * (20 * SECTOR_SIZE)
+    dst_img.write_bytes(oversized_bytes)
+    with pytest.raises(FileExistsError):
+        ResilientCloner("mock://size_dev", dst_img, total_sectors=total_sectors, map_path=map_file)
+    assert dst_img.read_bytes() == oversized_bytes
+
+    # 2. Mesmo se um mapa foi criado inicialmente quando a imagem não existia, e depois uma imagem maior surgiu antes de run()
+    dst_img.unlink()
+    cloner = ResilientCloner("mock://size_dev", dst_img, total_sectors=total_sectors, map_path=map_file)
+    # Outro processo cria arquivo maior antes de run()
+    dst_img.write_bytes(oversized_bytes)
+    with pytest.raises(FileExistsError, match="existe sem autorização de sobrescrita"):
+        cloner.run(reader_fn=lambda lba, count: b"\x22" * (count * SECTOR_SIZE))
+    assert dst_img.read_bytes() == oversized_bytes
+
+    # 3. Na retomada, se a imagem mudar de tamanho (ficar menor ou maior) entre __init__ e run(), aborta antes de escrever
+    dst_img.unlink()
+    cloner_init = ResilientCloner("mock://size_dev", dst_img, total_sectors=total_sectors, block_sectors=2, map_path=map_file)
+    cloner_init.run(
+        progress_cb=lambda s: cloner_init.cancel() if s.rescued_sectors >= 2 else None,
+        reader_fn=lambda lba, count: b"\x33" * (count * SECTOR_SIZE),
+    )
+    cloner_resume = ResilientCloner("mock://size_dev", dst_img, total_sectors=total_sectors, block_sectors=2, map_path=map_file)
+    assert cloner_resume.is_resuming is True
+
+    # Expande a imagem externamente antes de run()
+    expanded_bytes = dst_img.read_bytes() + (b"\xFF" * SECTOR_SIZE)
+    dst_img.write_bytes(expanded_bytes)
+    with pytest.raises(ValueError, match="Falha na revalidação pré-escrita|incompatível"):
+        cloner_resume.run(reader_fn=lambda lba, count: b"\x33" * (count * SECTOR_SIZE))
+    assert dst_img.read_bytes() == expanded_bytes
+
+
+def test_cloner_distinguishes_localized_bad_sector_from_fatal_errors_and_retries(tmp_path: Path):
+    """
+    Seção 5 (P0/P1):
+    1. Falha transitória de leitura de setor na Fase 2 que se recupera na 2ª tentativa -> marcado '+', sem zeros.
+    2. Bad sector persistente localizado -> tenta (1 + max_read_retries) vezes, preenche zeros e marca '-', registrando evidência.
+    3. Desconexão do dispositivo (winerror=1167 / DeviceDisconnectedError) -> aborta imediatamente sem zerar setores restantes.
+    4. Erro de permissão na origem (PermissionError / winerror=5) -> aborta imediatamente sem zerar setores.
+    5. Erro inesperado de callback/programação (RuntimeError) -> aborta imediatamente sem tratar como bad sector.
+    """
+    from core.recovery.resilient_clone import (
+        DeviceDisconnectedError,
+        DestinationWriteError,
+        SourceAccessError,
+    )
+
+    total_sectors = 16
+    dst_img = tmp_path / "phase2_retry.img"
+    map_file = tmp_path / "phase2_retry.map"
+
+    # Cenário 1 & 2 combinados:
+    # LBA 2 falha na Fase 1 e na 1ª tentativa da Fase 2, mas passa na 2ª tentativa da Fase 2 (transitório!)
+    # LBA 3 falha em todas as tentativas (bad sector real!)
+    lba2_attempts = {"phase2": 0}
+    lba3_attempts = {"total": 0}
+
+    def smart_mock_reader(lba: int, count: int) -> bytes:
+        req = set(range(lba, lba + count))
+        if count > 1 and (2 in req or 3 in req):
+            raise OSError(23, "Data error (cyclic redundancy check)")
+        if count == 1 and lba == 2:
+            lba2_attempts["phase2"] += 1
+            if lba2_attempts["phase2"] == 1:
+                raise OSError(23, "Transient CRC error on first single-sector read")
+            return b"RECOVERED_ON_RETRY" + b"\xAA" * (SECTOR_SIZE - 18)
+        if count == 1 and lba == 3:
+            lba3_attempts["total"] += 1
+            raise OSError(23, "Permanent bad sector at LBA 3")
+        return b"\x55" * (count * SECTOR_SIZE)
+
+    cloner = ResilientCloner(
+        device_path="mock://retry_drive",
+        output_image_path=dst_img,
+        total_sectors=total_sectors,
+        block_sectors=4,
+        skip_step_sectors=4,
+        map_path=map_file,
+        max_read_retries=2,
+    )
+    res = cloner.run(reader_fn=smart_mock_reader)
+    assert res.success is True
+    assert res.fully_recovered is False
+    assert res.bad_sectors == 1
+    assert res.rescued_sectors == total_sectors - 1
+    assert lba2_attempts["phase2"] == 2
+    assert lba3_attempts["total"] == 3  # 1 tentativa inicial + 2 retries
+    assert 3 in res.bad_sector_evidence
+    assert 2 not in res.bad_sector_evidence
+
+    img_bytes = dst_img.read_bytes()
+    assert img_bytes[2 * SECTOR_SIZE : 3 * SECTOR_SIZE].startswith(b"RECOVERED_ON_RETRY")
+    assert img_bytes[3 * SECTOR_SIZE : 4 * SECTOR_SIZE] == b"\x00" * SECTOR_SIZE
+
+    # Cenário 3: Desconexão física do dispositivo (winerror=1167 ERROR_DEVICE_NOT_CONNECTED) no meio da operação
+    dst_disc = tmp_path / "disconnected.img"
+    map_disc = tmp_path / "disconnected.map"
+
+    def disconnecting_reader(lba: int, count: int) -> bytes:
+        if lba >= 8:
+            err = OSError(22, "The device is not connected")
+            err.winerror = 1167
+            raise err
+        return b"\x44" * (count * SECTOR_SIZE)
+
+    cloner_disc = ResilientCloner(
+        device_path="mock://disc_drive",
+        output_image_path=dst_disc,
+        total_sectors=total_sectors,
+        block_sectors=4,
+        skip_step_sectors=4,
+        map_path=map_disc,
+    )
+    with pytest.raises(DeviceDisconnectedError):
+        cloner_disc.run(reader_fn=disconnecting_reader)
+    # Nenhum setor deve ter sido marcado como bad ('-') nem pulado ('*') por causa de desconexão!
+    assert cloner_disc.clone_map.bad_sectors == 0
+    assert cloner_disc.clone_map.skipped_sectors == 0
+
+    # Cenário 4: Erro de permissão na origem (PermissionError)
+    dst_perm = tmp_path / "perm.img"
+    cloner_perm = ResilientCloner("mock://perm_drive", dst_perm, total_sectors=total_sectors, block_sectors=4)
+    with pytest.raises(SourceAccessError):
+        cloner_perm.run(reader_fn=lambda lba, count: (_ for _ in ()).throw(PermissionError("Access denied")))
+    assert cloner_perm.clone_map.bad_sectors == 0
+
+    # Cenário 5: Exceção de programação (RuntimeError) no callback/reader não é tratada como bad sector
+    dst_bug = tmp_path / "bug.img"
+    cloner_bug = ResilientCloner("mock://bug_drive", dst_bug, total_sectors=total_sectors, block_sectors=4)
+    with pytest.raises(RuntimeError, match="Unexpected bug"):
+        cloner_bug.run(reader_fn=lambda lba, count: (_ for _ in ()).throw(RuntimeError("Unexpected bug")))
+    assert cloner_bug.clone_map.bad_sectors == 0
+    assert cloner_bug.clone_map.skipped_sectors == 0
+
+
+def test_cloner_4096_sector_size_and_geometry_validation(tmp_path: Path, monkeypatch):
+    """
+    Seção 6 (P1):
+    - Suporte completo a setores lógicos de 4096 bytes (4Kn): clonagem, mapa, retomada e alinhamento de offsets.
+    - Rejeição de sector_size divergente entre mapa e dispositivo.
+    - Rejeição de sector_size não suportado ou dispositivo físico sem geometria estabelecida.
+    """
+    sector_4k = 4096
+    total_sectors = 24
+    dst_4k = tmp_path / "disk_4kn.img"
+    map_4k = tmp_path / "disk_4kn.map"
+
+    def generate_4k_sector(lba: int) -> bytes:
+        hdr = struct.pack(">Q", lba) + b"_4KN_SECTOR_"
+        return hdr + bytes([lba % 251]) * (sector_4k - len(hdr))
+
+    bad_lbas = {5, 12}
+
+    def reader_4k(lba: int, count: int) -> bytes:
+        if set(range(lba, lba + count)) & bad_lbas:
+            raise OSError("4Kn sector read failure")
+        return b"".join(generate_4k_sector(s) for s in range(lba, lba + count))
+
+    # Sessão 1 (4Kn): para na metade e salva mapa
+    cloner1 = ResilientCloner(
+        device_path="mock://drive_4kn",
+        output_image_path=dst_4k,
+        total_sectors=total_sectors,
+        block_sectors=4,
+        skip_step_sectors=4,
+        map_path=map_4k,
+        sector_size=sector_4k,
+    )
+    res1 = cloner1.run(
+        progress_cb=lambda st: cloner1.cancel() if st.rescued_sectors >= 8 else None,
+        reader_fn=reader_4k,
+    )
+    assert res1.success is False
+    assert dst_4k.stat().st_size == total_sectors * sector_4k
+
+    # Tentar retomar com sector_size=512 contra o mapa de 4096 deve falhar antes da escrita!
+    with pytest.raises(ValueError, match="inválido, corrompido ou incompatível"):
+        ResilientCloner(
+            device_path="mock://drive_4kn",
+            output_image_path=dst_4k,
+            total_sectors=total_sectors,
+            map_path=map_4k,
+            sector_size=512,
+        )
+
+    # Sessão 2 (4Kn): retoma com sector_size=4096 e conclui
+    cloner2 = ResilientCloner(
+        device_path="mock://drive_4kn",
+        output_image_path=dst_4k,
+        total_sectors=total_sectors,
+        block_sectors=4,
+        skip_step_sectors=4,
+        map_path=map_4k,
+        sector_size=sector_4k,
+        verify_full_image_on_finish=True,
+    )
+    assert cloner2.is_resuming is True
+    res2 = cloner2.run(reader_fn=reader_4k)
+    assert res2.success is True
+    assert res2.sector_size == 4096
+    assert res2.incremental_sample_verified is True
+    assert res2.full_image_verified is True
+    assert res2.verified_sectors == total_sectors - len(bad_lbas)
+    assert res2.bad_sectors == len(bad_lbas)
+    assert res2.rescued_sectors == total_sectors - len(bad_lbas)
+
+    raw_4k = dst_4k.read_bytes()
+    assert len(raw_4k) == total_sectors * sector_4k
+    for s in range(total_sectors):
+        chunk = raw_4k[s * sector_4k : (s + 1) * sector_4k]
+        if s in bad_lbas:
+            assert chunk == b"\x00" * sector_4k
+        else:
+            assert chunk == generate_4k_sector(s)
+
+    # Tamanho de setor não suportado (ex: 1024) deve ser rejeitado
+    with pytest.raises(ValueError, match="não suportado"):
+        ResilientCloner("mock://drive_bad_sec", tmp_path / "bad_sec.img", total_sectors=10, sector_size=1024)
+
+    # Dispositivo físico cuja geometria não pôde ser obtida deve ser recusado antes de qualquer escrita
+    monkeypatch.setattr("core.recovery.resilient_clone.get_device_sector_size", lambda p: None)
+    monkeypatch.setattr("core.recovery.resilient_clone.is_physical_device_path", lambda p: True)
+    with pytest.raises(ValueError, match="Não foi possível estabelecer a geometria"):
+        ResilientCloner(r"\\.\PhysicalDrive99", tmp_path / "phys_no_geom.img", total_sectors=10)
+
+
+def test_cloner_full_verification_cost_and_cancellation(tmp_path: Path):
+    """
+    Seção 7 (P1): Valida estimativa de custo de leitura da verificação completa e suporte a cancelamento cooperativo.
+    """
+    total_sectors = 32
+    dst_img = tmp_path / "verify_cancel.img"
+    cloner = ResilientCloner(
+        device_path="mock://verify_dev",
+        output_image_path=dst_img,
+        total_sectors=total_sectors,
+        block_sectors=8,
+        skip_step_sectors=8,
+    )
+    res = cloner.run(reader_fn=lambda lba, count: b"\xAB" * (count * SECTOR_SIZE))
+    assert res.success is True
+    assert res.incremental_sample_verified is True
+    assert res.full_image_verified is False
+
+    cost = cloner.estimate_full_verification_cost(assumed_speed_mb_s=50.0)
+    assert cost["rescued_sectors"] == total_sectors
+    assert cost["bytes_to_read"] == total_sectors * SECTOR_SIZE
+    assert cost["estimated_seconds"] >= 0.0
+
+    # Cancela cooperativamente no meio da verificação completa
+    def cancel_on_progress(verified, total):
+        if verified >= 8:
+            cloner.cancel()
+
+    ok, verified_count, msg = cloner.verify_rescued_sectors(
+        reader_fn=lambda lba, count: b"\xAB" * (count * SECTOR_SIZE),
+        progress_cb=cancel_on_progress,
+    )
+    assert ok is False
+    assert verified_count == 8
+    assert "cancelada" in msg.lower()
+
+
+
 

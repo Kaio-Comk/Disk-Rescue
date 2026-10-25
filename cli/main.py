@@ -1,5 +1,5 @@
 """
-cli/main.py — Interface de Linha de Comando (CLI) interativa do DiskRescue v0.3.2.
+cli/main.py — Interface de Linha de Comando (CLI) interativa do DiskRescue v0.3.3.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ except ImportError:
 def banner():
     txt = """
     ╔═══════════════════════════════════════════════════════════════╗
-    ║                🛠️  D I S K R E S C U E  v0.3.2                ║
+    ║                🛠️  D I S K R E S C U E  v0.3.3                ║
     ║        Sistema Autônomo de Diagnóstico e Recuperação          ║
     ╚═══════════════════════════════════════════════════════════════╝
     """

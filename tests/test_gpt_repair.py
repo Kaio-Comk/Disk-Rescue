@@ -198,8 +198,8 @@ def test_repair_gpt_partition_offset_syncs_backup_and_rejects_overlaps(tmp_path)
     assert reopened is not None
     assert reopened.partitions[1].first_lba == 40000
     assert reopened.partitions[1].last_lba == 50000
-    # Verifica que flags originais foram preservadas
-    assert reopened.partitions[1].flags == 0x0
+    # Verifica que flags originais foram preservadas (incluindo bit 63 = 0x8000000000000000)
+    assert reopened.partitions[1].flags == 0x8000000000000000
 
 
 def test_repair_gpt_validates_backup_dir_before_mkdir(tmp_path, monkeypatch):
@@ -661,6 +661,129 @@ def test_repair_gpt_aborts_before_any_disk_write_if_snapshot_corrupted(tmp_path,
     assert res.success is False
     assert disk_opened_rw["opened"] is False, "O disco jamais pode ser aberto para escrita se o snapshot falhar!"
     assert real_open(img, "rb").read() == original
+
+
+def test_repair_gpt_preserves_custom_partition_flags_and_other_entries(tmp_path):
+    """
+    Seção 8 (P1):
+    - Partição com bit 63 ativo (0x8000000000000000) e atributos personalizados (0x8000000000000005):
+      os atributos permanecem inalterados após o reparo de offset.
+    - Todas as outras entradas de partição permanecem byte a byte idênticas.
+    - CRCs primária e de backup válidas após a operação.
+    - structural_diff documenta exatamente os campos alterados.
+    """
+    from core.filesystem.scanner import DiscoveredFilesystem
+    from core.recovery.repair import repair_gpt_partition_offset
+
+    disk_bytes = _build_full_gpt_disk()
+    # Modifica a entrada 1 (offset 2*512 = 1024) para ter flags personalizadas (bit 63 + bits 0 e 2)
+    custom_flags = 0x8000000000000005
+    struct.pack_into("<Q", disk_bytes, 2 * 512 + 48, custom_flags)
+    struct.pack_into("<Q", disk_bytes, (1999 - 32) * 512 + 48, custom_flags)
+
+    # Adiciona uma segunda partição (índice 2, offset 2*512 + 128) para provar preservação byte a byte
+    p2 = GPTPartitionEntry(
+        index=2,
+        type_guid=b"\x16\xe3\xc9\xe3" + b"\x77" * 12,
+        unique_guid=b"\x22" * 16,
+        first_lba=900,
+        last_lba=1200,
+        flags=0xC000000000000001,
+        name="Untouched MSR Partition",
+    )
+    p2_bytes = p2.to_bytes(128)
+    disk_bytes[2 * 512 + 128 : 2 * 512 + 256] = p2_bytes
+    disk_bytes[(1999 - 32) * 512 + 128 : (1999 - 32) * 512 + 256] = p2_bytes
+
+    # Recalcula CRCs da tabela e dos cabeçalhos primário e de backup
+    entries_slice = disk_bytes[2 * 512 : 34 * 512]
+    part_crc = zlib.crc32(entries_slice) & 0xFFFFFFFF
+    struct.pack_into("<I", disk_bytes, 512 + 88, part_crc)
+    struct.pack_into("<I", disk_bytes, 512 + 16, 0)
+    struct.pack_into("<I", disk_bytes, 512 + 16, zlib.crc32(disk_bytes[512 : 512 + 92]) & 0xFFFFFFFF)
+
+    struct.pack_into("<I", disk_bytes, 1999 * 512 + 88, part_crc)
+    struct.pack_into("<I", disk_bytes, 1999 * 512 + 16, 0)
+    struct.pack_into("<I", disk_bytes, 1999 * 512 + 16, zlib.crc32(disk_bytes[1999 * 512 : 1999 * 512 + 92]) & 0xFFFFFFFF)
+
+    img = tmp_path / "flags_preserved_disk.bin"
+    img.write_bytes(disk_bytes)
+    orig_entries_without_p1 = disk_bytes[2 * 512 + 128 : 34 * 512]
+
+    fs = DiscoveredFilesystem("NTFS", start_lba=200, total_sectors=600, size_bytes=600 * 512)
+    res = repair_gpt_partition_offset(str(img), 1, fs, backup_dir=tmp_path / "flags_snaps")
+    assert res.success is True
+    assert res.write_completed is True
+    assert res.post_write_verified is True
+    assert any("preservado" in d for d in res.structural_diff)
+
+    repaired = img.read_bytes()
+    with open(img, "rb") as f:
+        gpt_after = parse_gpt(f)
+    assert gpt_after is not None
+    assert gpt_after.is_header_crc_valid is True
+    assert gpt_after.is_entries_crc_valid is True
+    assert gpt_after.partitions[0].first_lba == 200
+    assert gpt_after.partitions[0].last_lba == 799
+    assert gpt_after.partitions[0].flags == custom_flags
+    # Todas as outras 127 entradas (índices 2..128) permanecem byte a byte idênticas!
+    assert repaired[2 * 512 + 128 : 34 * 512] == orig_entries_without_p1
+    assert repaired[(1999 - 32) * 512 + 128 : 1999 * 512] == orig_entries_without_p1
+
+
+def test_repair_gpt_isolates_storage_cache_refresh_failure_and_timeout(tmp_path, monkeypatch):
+    """
+    Seção 9 (P1):
+    - Gravação GPT bem-sucedida + Update-HostStorageCache com falha (OSError ou returncode != 0) ->
+      success=True preservado, cache_refresh_succeeded=False, cache_refresh_warning preenchido, sem rollback.
+    - Gravação GPT bem-sucedida + Update-HostStorageCache com TimeoutExpired ->
+      success=True preservado, cache_refresh_succeeded=False, cache_refresh_warning preenchido, sem rollback.
+    """
+    import subprocess
+    from core.filesystem.scanner import DiscoveredFilesystem
+    from core.recovery.repair import repair_gpt_partition_offset
+
+    fs = DiscoveredFilesystem("NTFS", start_lba=200, total_sectors=600, size_bytes=600 * 512)
+
+    # 1. TimeoutExpired no Update-HostStorageCache
+    img1 = tmp_path / "cache_timeout_disk.bin"
+    img1.write_bytes(_build_full_gpt_disk())
+
+    def mock_run_timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=10)
+
+    monkeypatch.setattr(subprocess, "run", mock_run_timeout)
+    res_timeout = repair_gpt_partition_offset(str(img1), 1, fs, backup_dir=tmp_path / "cache_b1")
+    assert res_timeout.success is True
+    assert res_timeout.write_completed is True
+    assert res_timeout.post_write_verified is True
+    assert res_timeout.rollback_attempted is False
+    assert res_timeout.final_state_uncertain is False
+    assert res_timeout.cache_refresh_attempted is True
+    assert res_timeout.cache_refresh_succeeded is False
+    assert "Update-HostStorageCache" in res_timeout.cache_refresh_warning
+
+    # Confirma que os dados reparados permaneceram gravados no disco (não houve falso erro nem rollback)
+    with open(img1, "rb") as f1:
+        gpt1 = parse_gpt(f1)
+    assert gpt1.partitions[0].first_lba == 200
+
+    # 2. Falha de processo (returncode=1) no Update-HostStorageCache
+    img2 = tmp_path / "cache_rc_fail_disk.bin"
+    img2.write_bytes(_build_full_gpt_disk())
+
+    def mock_run_rc1(*args, **kwargs):
+        return subprocess.CompletedProcess(args=args[0], returncode=1, stdout="", stderr="Access denied to WMI Storage Cache")
+
+    monkeypatch.setattr(subprocess, "run", mock_run_rc1)
+    res_rc1 = repair_gpt_partition_offset(str(img2), 1, fs, backup_dir=tmp_path / "cache_b2")
+    assert res_rc1.success is True
+    assert res_rc1.write_completed is True
+    assert res_rc1.post_write_verified is True
+    assert res_rc1.rollback_attempted is False
+    assert res_rc1.cache_refresh_succeeded is False
+    assert "código 1" in res_rc1.cache_refresh_warning
+
 
 
 

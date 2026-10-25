@@ -317,4 +317,70 @@ def test_smart_windows_reliability_errors_prevent_false_green():
     assert any("windows reportou" in m.lower() for m in rep_win_err.summary_messages)
 
 
+def test_smart_5_197_with_only_power_on_hours_returns_unknown_not_green():
+    """
+    Seção 10 (P2):
+    - {5: 0, 197: 0} -> UNKNOWN.
+    - {5: 0, 197: 0, 9: 1000} -> UNKNOWN (ID 9 mede apenas tempo ligado, não integridade!).
+    - {5: 0, 197: 0, 198: 0, 199: 0} -> GREEN (com evidência de integridade complementar).
+    - {5: 0, 197: 0, 9: 1000, 245: 7} -> UNKNOWN.
+    """
+    rep_5_197_9 = analyze_smart_data(
+        device_id=21,
+        device_path=r"\\.\PhysicalDrive21",
+        model="Hours Only Drive",
+        serial="HRS021",
+        raw_attributes={5: 0, 197: 0, 9: 1000},
+        temperature_c=34,
+    )
+    assert rep_5_197_9.risk_level == SmartRiskLevel.UNKNOWN
+    assert rep_5_197_9.power_on_hours == 1000
+    assert any("id 9" in e.lower() for e in rep_5_197_9.evidencia_observada)
+
+    rep_green = analyze_smart_data(
+        device_id=22,
+        device_path=r"\\.\PhysicalDrive22",
+        model="Supported Green Drive",
+        serial="GRN022",
+        raw_attributes={5: 0, 197: 0, 198: 0, 199: 0},
+        temperature_c=34,
+    )
+    assert rep_green.risk_level == SmartRiskLevel.GREEN
+    assert "garantia absoluta" in rep_green.action_recommendation.lower()
+
+
+def test_smart_preserves_none_raw_values_and_rejects_impossible_normalized_values():
+    """
+    Seção 11 (P2):
+    - raw_value=None permanece None em SmartAttribute.raw_value (nunca é convertido para 0) e impede GREEN.
+    - Valores normalizados malformados ou fora da faixa ATA (ex: current=0, worst=999, thresh=-1) são rejeitados
+      e impedem falso GREEN.
+    """
+    rep_none_raw = analyze_smart_data(
+        device_id=23,
+        device_path=r"\\.\PhysicalDrive23",
+        model="None Raw Attribute Drive",
+        serial="NON023",
+        raw_attributes={5: 0, 197: 0, 198: 0, 199: None},
+        temperature_c=33,
+    )
+    assert rep_none_raw.attributes[199].raw_value is None
+    assert rep_none_raw.crc_errors is None
+    assert rep_none_raw.risk_level == SmartRiskLevel.UNKNOWN
+
+    rep_bad_norm = analyze_smart_data(
+        device_id=24,
+        device_path=r"\\.\PhysicalDrive24",
+        model="Malformed Normalized Drive",
+        serial="NRM024",
+        raw_attributes={5: 0, 197: 0, 198: 0, 199: 0},
+        normalized_attributes={5: (0, 300, -5)},  # Valores fora da faixa ATA (1..255 / 0..255)
+        temperature_c=33,
+    )
+    assert rep_bad_norm.risk_level == SmartRiskLevel.UNKNOWN
+    assert rep_bad_norm.attributes[5].current is None
+    assert any("fora da faixa" in e.lower() for e in rep_bad_norm.evidencia_observada)
+
+
+
 

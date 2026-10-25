@@ -15,9 +15,20 @@ log = logging.getLogger("diskrescue.device_resolver")
 
 # Windows API constants
 IOCTL_STORAGE_GET_DEVICE_NUMBER = 0x002D1080
+IOCTL_DISK_GET_DRIVE_GEOMETRY_EX = 0x000700A0
 FILE_SHARE_READ = 0x00000001
 FILE_SHARE_WRITE = 0x00000002
 OPEN_EXISTING = 3
+
+
+def is_physical_device_path(target: str | Path) -> bool:
+    """Retorna True se o caminho representar um dispositivo físico ou volume bruto Win32 (não mock)."""
+    s = str(target).strip()
+    if s.startswith("mock://"):
+        return False
+    return bool(re.search(r"PhysicalDrive\d+", s, re.IGNORECASE)) or (
+        s.startswith(r"\\.") or s.startswith("\\\\?\\") or "volume{" in s.lower()
+    )
 
 
 if os.name == "nt":
@@ -145,6 +156,58 @@ def get_physical_drive_number(target: str | Path) -> Optional[int]:
             kernel32.CloseHandle(handle)
     except Exception as exc:
         log.debug("Erro ao consultar IOCTL_STORAGE_GET_DEVICE_NUMBER para %s: %s", volume_to_query, exc)
+
+    return None
+
+
+def get_device_sector_size(target: str | Path) -> Optional[int]:
+    """
+    Consulta o tamanho de setor lógico real (ex: 512 ou 4096 bytes em discos 4Kn)
+    de um dispositivo físico ou volume no Windows via IOCTL_DISK_GET_DRIVE_GEOMETRY_EX.
+    Retorna None para arquivos comuns, caminhos mock:// ou caso a geometria não possa ser obtida.
+    """
+    target_str = str(target).strip()
+    if target_str.startswith("mock://") or os.name != "nt":
+        return None
+    if not is_physical_device_path(target_str):
+        return None
+
+    try:
+        handle = kernel32.CreateFileW(
+            target_str,
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            0,
+            None,
+        )
+        if handle == INVALID_HANDLE_VALUE or handle == 0 or handle is None:
+            return None
+        try:
+            out_buf = ctypes.create_string_buffer(256)
+            bytes_returned = wintypes.DWORD(0)
+            ok = kernel32.DeviceIoControl(
+                handle,
+                IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+                None,
+                0,
+                out_buf,
+                ctypes.sizeof(out_buf),
+                ctypes.byref(bytes_returned),
+                None,
+            )
+            # DISK_GEOMETRY inicia em offset 0: Cylinders (8B), MediaType (4B),
+            # TracksPerCylinder (4B), SectorsPerTrack (4B), BytesPerSector (4B em offset 20)
+            if ok and bytes_returned.value >= 24:
+                import struct
+                bytes_per_sector = struct.unpack_from("<I", out_buf.raw, 20)[0]
+                if bytes_per_sector > 0 and bytes_per_sector % 512 == 0:
+                    return int(bytes_per_sector)
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception as exc:
+        log.debug("Erro ao consultar IOCTL_DISK_GET_DRIVE_GEOMETRY_EX para %s: %s", target_str, exc)
 
     return None
 

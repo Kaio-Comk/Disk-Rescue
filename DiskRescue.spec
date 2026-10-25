@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# DiskRescue v0.3.2 — PyInstaller Spec
+# DiskRescue v0.3.3 — PyInstaller Spec
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 datas = []

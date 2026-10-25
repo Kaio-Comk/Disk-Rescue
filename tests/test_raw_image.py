@@ -277,3 +277,29 @@ except FileExistsError:
     assert len(list(tmp_path.glob("*.tmp"))) == 0
 
 
+def test_raw_image_result_explicit_api_contract(tmp_path):
+    """
+    Seção 12 (P1): Valida propriedade explícita .success, __bool__, .status, .sectors_written, .bytes_written e .message
+    em todos os estados de RawImageResult.
+    """
+    src = tmp_path / "contract_src.bin"
+    src.write_bytes(b"\x5A" * 2048)  # 4 setores de 512 B
+    dst = tmp_path / "contract_dst.img"
+
+    res_ok = create_raw_disk_image(str(src), dst, sector_size=512, max_sectors=4)
+    assert res_ok.status == RawImageStatus.COMPLETED
+    assert res_ok.success is True
+    assert bool(res_ok) is True
+    assert res_ok.sectors_written == 4
+    assert res_ok.bytes_written == 2048
+    assert res_ok.message != ""
+
+    res_partial = create_raw_disk_image(str(src), tmp_path / "partial_dst.img", sector_size=512, max_sectors=10)
+    assert res_partial.status == RawImageStatus.PARTIAL
+    assert res_partial.success is False
+    assert bool(res_partial) is False
+    assert res_partial.sectors_written == 4
+    assert res_partial.bytes_written == 2048
+
+
+

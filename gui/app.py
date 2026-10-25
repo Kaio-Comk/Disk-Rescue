@@ -1,5 +1,5 @@
 """
-gui/app.py — Interface Gráfica Moderna e Profissional (GUI) do DiskRescue v0.3.2.
+gui/app.py — Interface Gráfica Moderna e Profissional (GUI) do DiskRescue v0.3.3.
 Construída com Tkinter + Sun Valley (sv_ttk) no padrão Windows 11 Fluent Design.
 Oferece Navegação por Sidebar, Dashboard de Saúde, Diagnóstico & Reparo de Partições,
 Telemetria SMART ATA, Clonagem Resiliente em Duas Fases (estilo GNU ddrescue),
@@ -42,7 +42,11 @@ from core.filesystem.ntfs_boot_repair import (
     restore_ntfs_boot_from_backup,
 )
 from core.filesystem.scanner import DiscoveredFilesystem, scan_boot_sectors
-from core.hardware.device_resolver import assert_safe_source_and_destination
+from core.hardware.device_resolver import (
+    assert_safe_source_and_destination,
+    get_device_sector_size,
+    is_physical_device_path,
+)
 from core.hardware.scanner import DiskInfo, is_admin, relaunch_as_admin, scan_disks
 from core.hardware.smart import SmartReport, SmartRiskLevel, query_smart_report_windows
 from core.hardware.surface_scan import SurfaceBlockResult, SurfaceScanSummary, scan_surface_latency
@@ -66,7 +70,7 @@ class OperationState(Enum):
 class DiskRescueApp:
     def __init__(self, root: tk.Tk, auto_refresh: bool = True):
         self.root = root
-        self.root.title("DiskRescue v0.3.2 — Diagnóstico, Clonagem Resiliente & Recuperação Forense")
+        self.root.title("DiskRescue v0.3.3 — Diagnóstico, Clonagem Resiliente & Recuperação Forense")
         self.root.geometry("1240x820")
         self.root.minsize(1080, 720)
 
@@ -208,7 +212,7 @@ class DiskRescueApp:
 
         version_badge = ttk.Label(
             title_row,
-            text=" v0.3.2 ",
+            text=" v0.3.3 ",
             font=("Segoe UI", 9, "bold"),
             background="#1e293b",
             foreground="#38bdf8",
@@ -1769,10 +1773,69 @@ class DiskRescueApp:
 
         self.btn_start_clone.config(state=tk.DISABLED)
         self.btn_cancel_clone.config(state=tk.NORMAL)
-        total_sectors = target_disk.size_bytes // 512
+
+        dest_path = Path(dest)
+        hw_sector_size = get_device_sector_size(target_disk.device_path)
+        if is_physical_device_path(target_disk.device_path) and hw_sector_size is None:
+            messagebox.showerror(
+                "Erro de Geometria",
+                f"Não foi possível consultar o tamanho de setor lógico do dispositivo físico '{target_disk.device_path}'.\n"
+                "Operação recusada antes da escrita para evitar desalinhamento de LBAs."
+            )
+            self.btn_start_clone.config(state=tk.NORMAL)
+            self.btn_cancel_clone.config(state=tk.DISABLED)
+            return
+
+        sector_size = hw_sector_size if hw_sector_size is not None else 512
+        total_sectors = target_disk.size_bytes // sector_size
 
         try:
-            cloner = ResilientCloner(target_disk.device_path, Path(dest), total_sectors)
+            cloner = ResilientCloner(
+                target_disk.device_path,
+                dest_path,
+                total_sectors,
+                sector_size=sector_size,
+                allow_overwrite=False,
+            )
+        except (FileExistsError, ValueError) as err:
+            err_msg = str(err)
+            # Se for bloqueio de imagem existente sem mapa ou mapa inválido/incompatível, exige confirmação explícita
+            is_overwrite_block = isinstance(err, FileExistsError) or (
+                "Operação bloqueada por segurança" in err_msg
+                or "Tamanho da imagem existente" in err_msg
+                or "Operação recusada por padrão" in err_msg
+            )
+            if is_overwrite_block:
+                confirm_restart = messagebox.askyesno(
+                    "⚠️ Confirmar Reinicialização e Sobrescrita de Imagem",
+                    f"{err_msg}\n\n"
+                    f"ATENÇÃO: Os dados existentes na imagem de destino '{dest_path}' PODEM SER SOBRESCRITOS "
+                    "caso você reinicialize uma nova clonagem do zero.\n\n"
+                    "Deseja autorizar explicitamente a reinicialização e sobrescrever a imagem existente?"
+                )
+                if not confirm_restart:
+                    self.log("Clonagem cancelada pelo operador: imagem e mapa existentes preservados intactos.\n")
+                    self.btn_start_clone.config(state=tk.NORMAL)
+                    self.btn_cancel_clone.config(state=tk.DISABLED)
+                    return
+                try:
+                    cloner = ResilientCloner(
+                        target_disk.device_path,
+                        dest_path,
+                        total_sectors,
+                        sector_size=sector_size,
+                        allow_overwrite=True,
+                    )
+                except Exception as retry_err:
+                    messagebox.showerror("Erro de Inicialização", str(retry_err))
+                    self.btn_start_clone.config(state=tk.NORMAL)
+                    self.btn_cancel_clone.config(state=tk.DISABLED)
+                    return
+            else:
+                messagebox.showerror("Erro de Inicialização", err_msg)
+                self.btn_start_clone.config(state=tk.NORMAL)
+                self.btn_cancel_clone.config(state=tk.DISABLED)
+                return
         except Exception as err:
             messagebox.showerror("Erro de Inicialização", str(err))
             self.btn_start_clone.config(state=tk.NORMAL)

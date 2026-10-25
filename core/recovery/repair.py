@@ -144,6 +144,11 @@ class RawImageResult:
     target_path: Path | None = None
     message: str = ""
 
+    @property
+    def success(self) -> bool:
+        """Propriedade explícita de compatibilidade indicando conclusão integral sem erros."""
+        return self.status == RawImageStatus.COMPLETED
+
     def __bool__(self) -> bool:
         return self.status == RawImageStatus.COMPLETED
 
@@ -155,11 +160,18 @@ class RepairResult:
     backup_file: Path | None = None
     secondary_backup_file: Path | None = None
     old_start_lba: int = 0
+    old_end_lba: int = 0
     new_start_lba: int = 0
     new_end_lba: int = 0
+    write_completed: bool = False
+    post_write_verified: bool = False
     rollback_attempted: bool = False
     rollback_confirmed: bool = False
     final_state_uncertain: bool = False
+    cache_refresh_attempted: bool = False
+    cache_refresh_succeeded: bool = True
+    cache_refresh_warning: str = ""
+    structural_diff: list[str] = field(default_factory=list)
     region_snapshots: dict[str, Path] = field(default_factory=dict)
 
 
@@ -168,7 +180,8 @@ def repair_gpt_partition_offset(
     target_partition_index: int,
     discovered_fs: DiscoveredFilesystem,
     backup_dir: Path | None = None,
-    sector_size: int = DEFAULT_SECTOR_SIZE
+    sector_size: int = DEFAULT_SECTOR_SIZE,
+    clear_no_drive_letter_flag: bool = False,
 ) -> RepairResult:
     """Corrige o offset de início e fim de uma partição na tabela GPT com snapshot completo (primário e backup) e rollback verificado."""
     if sector_size <= 0 or sector_size % 512 != 0 or sector_size > 65536:
@@ -191,6 +204,12 @@ def repair_gpt_partition_offset(
     primary_backup_path: Path | None = None
     secondary_backup_path: Path | None = None
     region_snapshots: dict[str, Path] = {}
+    opened_for_write = False
+    write_completed = False
+    post_write_verified = False
+    rollback_attempted = False
+    rollback_confirmed = False
+    structural_diff: list[str] = []
 
     try:
         # Fase 1: Leitura estritamente em modo somente-leitura ("rb") e criação/validação de todos os snapshots
@@ -311,6 +330,8 @@ def repair_gpt_partition_offset(
                 )
 
             old_start = part_to_update.first_lba
+            old_end = part_to_update.last_lba
+            old_flags = part_to_update.flags
             new_start = discovered_fs.start_lba
             new_end = discovered_fs.end_lba
 
@@ -412,12 +433,16 @@ def repair_gpt_partition_offset(
         prim_snap_hash = hashlib.sha256(orig_primary_bytes).digest()
         bkp_snap_hash = hashlib.sha256(orig_backup_bytes).digest()
 
-        log.info("Ajustando partição %d: LBA %d -> LBA %d..%d", target_partition_index, old_start, new_start, new_end)
+        log.info("Ajustando partição %d: LBA %d..%d -> LBA %d..%d", target_partition_index, old_start, old_end, new_start, new_end)
 
-        # Atualiza o objeto da partição
+        # Atualiza estritamente first_lba e last_lba da partição alvo.
+        # Preserva integralmente os atributos (flags) por padrão (Seção 8), a menos que clear_no_drive_letter_flag=True seja solicitado.
         part_to_update.first_lba = new_start
         part_to_update.last_lba = new_end
-        part_to_update.flags = part_to_update.flags & ~0x8000000000000000
+        if clear_no_drive_letter_flag:
+            part_to_update.flags = old_flags & ~0x8000000000000000
+        else:
+            part_to_update.flags = old_flags
 
         # 3. Recalcular estruturas primária e de backup
         new_header_bytes, new_entries_bytes = rebuild_gpt(gpt, gpt.partitions, sector_size=sector_size)
@@ -435,7 +460,67 @@ def repair_gpt_partition_offset(
         if len(bkp_entries_bytes) < entries_sectors * sector_size:
             bkp_entries_bytes = bkp_entries_bytes + orig_bkp_entries_bytes[len(bkp_entries_bytes):]
 
+        # Validação estrita de preservação byte a byte de todas as outras entradas e dos campos não-offset da entrada alvo
+        ent_size = gpt.partition_entry_size
+        for idx in range(gpt.num_partition_entries):
+            entry_num = idx + 1
+            e_off = idx * ent_size
+            orig_ent = orig_prim_entries_bytes[e_off : e_off + ent_size]
+            new_ent = new_entries_bytes[e_off : e_off + ent_size]
+            bkp_ent = bkp_entries_bytes[e_off : e_off + ent_size]
+            if new_ent != bkp_ent:
+                return RepairResult(
+                    success=False,
+                    message=f"Inconsistência interna: entrada {entry_num} diverge entre tabela primária e de backup geradas.",
+                    backup_file=primary_backup_path,
+                    secondary_backup_file=secondary_backup_path,
+                    region_snapshots=region_snapshots,
+                )
+            if entry_num != target_partition_index:
+                if new_ent != orig_ent:
+                    return RepairResult(
+                        success=False,
+                        message=f"Violação de preservação: entrada GPT não-alvo (índice {entry_num}) foi alterada indevidamente.",
+                        backup_file=primary_backup_path,
+                        secondary_backup_file=secondary_backup_path,
+                        region_snapshots=region_snapshots,
+                    )
+            else:
+                # Verifica que partition_type_guid (0..16), unique_partition_guid (16..32), e nome/resto (56..ent_size) estão idênticos
+                if new_ent[:32] != orig_ent[:32] or new_ent[56:] != orig_ent[56:]:
+                    return RepairResult(
+                        success=False,
+                        message="Violação de preservação: GUIDs ou nome da partição alvo foram alterados durante rebuild.",
+                        backup_file=primary_backup_path,
+                        secondary_backup_file=secondary_backup_path,
+                        region_snapshots=region_snapshots,
+                    )
+                if not clear_no_drive_letter_flag and new_ent[48:56] != orig_ent[48:56]:
+                    return RepairResult(
+                        success=False,
+                        message="Violação de preservação: atributos (flags) da partição alvo foram alterados sem autorização.",
+                        backup_file=primary_backup_path,
+                        secondary_backup_file=secondary_backup_path,
+                        region_snapshots=region_snapshots,
+                    )
+
+        new_prim_hcrc = struct.unpack("<I", new_header_bytes[16:20])[0]
+        new_part_crc = struct.unpack("<I", new_header_bytes[88:92])[0]
+        new_bkp_hcrc = struct.unpack("<I", bkp_header_bytes[16:20])[0]
+        structural_diff = [
+            f"partition[{target_partition_index}].first_lba: {old_start} -> {new_start}",
+            f"partition[{target_partition_index}].last_lba: {old_end} -> {new_end}",
+            (
+                f"partition[{target_partition_index}].flags: 0x{old_flags:016X} -> 0x{part_to_update.flags:016X} "
+                f"({'alterado por solicitação explícita' if clear_no_drive_letter_flag else 'preservado'})"
+            ),
+            f"gpt.partition_entries_crc32: 0x{gpt.partition_entries_crc:08X} -> 0x{new_part_crc:08X}",
+            f"gpt.primary_header_crc32: 0x{gpt.header_crc:08X} -> 0x{new_prim_hcrc:08X}",
+            f"gpt.backup_header_crc32: -> 0x{new_bkp_hcrc:08X}",
+        ]
+
         # Fase 2: Somente após validação integral de todos os 7 snapshots, abre o dispositivo para escrita ("r+b")
+        opened_for_write = True
         with open(device_path, "r+b") as f:
 
             def do_rollback() -> bool:
@@ -527,6 +612,7 @@ def repair_gpt_partition_offset(
 
                 f.flush()
                 os.fsync(f.fileno())
+                write_completed = True
 
                 # Verificação pós-escrita imediata em todas as regiões (incluindo preservação do MBR protetor)
                 f.seek(0)
@@ -554,18 +640,28 @@ def repair_gpt_partition_offset(
                 if read_bkp_hdr != bkp_header_bytes:
                     raise OSError("Verificação pós-escrita falhou no cabeçalho GPT de backup.")
 
+                post_write_verified = True
+
             except Exception as write_err:
                 log.error("Erro na gravação ou verificação GPT: %s", write_err)
-                rb_ok = do_rollback()
-                if rb_ok:
+                rollback_attempted = True
+                rollback_confirmed = do_rollback()
+                if rollback_confirmed:
                     return RepairResult(
                         success=False,
                         message=f"Falha na gravação/verificação ({write_err}). Rollback executado com sucesso e verificado.",
                         backup_file=primary_backup_path,
                         secondary_backup_file=secondary_backup_path,
+                        old_start_lba=old_start,
+                        old_end_lba=old_end,
+                        new_start_lba=new_start,
+                        new_end_lba=new_end,
+                        write_completed=write_completed,
+                        post_write_verified=False,
                         rollback_attempted=True,
                         rollback_confirmed=True,
                         final_state_uncertain=False,
+                        structural_diff=structural_diff,
                         region_snapshots=region_snapshots,
                     )
                 else:
@@ -577,44 +673,105 @@ def repair_gpt_partition_offset(
                         ),
                         backup_file=primary_backup_path,
                         secondary_backup_file=secondary_backup_path,
+                        old_start_lba=old_start,
+                        old_end_lba=old_end,
+                        new_start_lba=new_start,
+                        new_end_lba=new_end,
+                        write_completed=write_completed,
+                        post_write_verified=False,
                         rollback_attempted=True,
                         rollback_confirmed=False,
                         final_state_uncertain=True,
+                        structural_diff=structural_diff,
                         region_snapshots=region_snapshots,
                     )
 
         log.info("Tabela GPT primária e de backup corrigidas e verificadas com sucesso.")
 
-        # 6. Notificar o sistema operacional para atualizar o cache de disco
+        # 6. Etapa secundária isolada (Seção 9): Notificar o Windows para atualizar o cache de armazenamento.
+        # Falha ou timeout aqui NUNCA invalida a gravação já verificada nem aciona rollback.
+        cache_refresh_attempted = False
+        cache_refresh_succeeded = True
+        cache_refresh_warning = ""
         if os.name == "nt":
-            subprocess.run(["powershell", "-NoProfile", "-Command", "Update-HostStorageCache"], capture_output=True, timeout=10)
+            cache_refresh_attempted = True
+            try:
+                proc = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", "Update-HostStorageCache"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if proc.returncode != 0:
+                    cache_refresh_succeeded = False
+                    stderr_txt = (proc.stderr or "").strip()
+                    cache_refresh_warning = (
+                        f"Gravação GPT concluída e verificada, mas Update-HostStorageCache retornou código {proc.returncode}"
+                        + (f" ({stderr_txt})." if stderr_txt else ".")
+                    )
+                    log.warning(cache_refresh_warning)
+            except Exception as cache_exc:
+                cache_refresh_succeeded = False
+                cache_refresh_warning = (
+                    f"Gravação GPT concluída e verificada no disco, mas não foi possível atualizar o cache de "
+                    f"armazenamento do Windows (Update-HostStorageCache: {cache_exc})."
+                )
+                log.warning(cache_refresh_warning)
+
+        msg = f"Partição {target_partition_index} realinhada com sucesso para LBA {new_start:,}..{new_end:,} ({discovered_fs.size_gb:.1f} GB)."
+        if cache_refresh_warning:
+            msg = f"{msg} Aviso pós-gravação: {cache_refresh_warning}"
 
         return RepairResult(
             success=True,
-            message=f"Partição {target_partition_index} realinhada com sucesso para LBA {new_start:,}..{new_end:,} ({discovered_fs.size_gb:.1f} GB).",
+            message=msg,
             backup_file=primary_backup_path,
             secondary_backup_file=secondary_backup_path,
             old_start_lba=old_start,
+            old_end_lba=old_end,
             new_start_lba=new_start,
             new_end_lba=new_end,
+            write_completed=write_completed,
+            post_write_verified=post_write_verified,
+            rollback_attempted=False,
+            rollback_confirmed=False,
+            final_state_uncertain=False,
+            cache_refresh_attempted=cache_refresh_attempted,
+            cache_refresh_succeeded=cache_refresh_succeeded,
+            cache_refresh_warning=cache_refresh_warning,
+            structural_diff=structural_diff,
             region_snapshots=region_snapshots,
         )
 
     except PermissionError:
+        uncertain = opened_for_write and not post_write_verified and not rollback_confirmed
         return RepairResult(
             success=False,
             message="Permissão negada ao gravar no disco. Execute o terminal como Administrador/root.",
             backup_file=primary_backup_path,
             secondary_backup_file=secondary_backup_path,
+            write_completed=write_completed,
+            post_write_verified=post_write_verified,
+            rollback_attempted=rollback_attempted,
+            rollback_confirmed=rollback_confirmed,
+            final_state_uncertain=uncertain,
+            structural_diff=structural_diff,
             region_snapshots=region_snapshots,
         )
     except Exception as exc:
         log.error("Exceção ao reparar tabela GPT: %s", exc)
+        uncertain = opened_for_write and not post_write_verified and not rollback_confirmed
         return RepairResult(
             success=False,
             message=f"Erro durante a operação: {exc}",
             backup_file=primary_backup_path,
             secondary_backup_file=secondary_backup_path,
+            write_completed=write_completed,
+            post_write_verified=post_write_verified,
+            rollback_attempted=rollback_attempted,
+            rollback_confirmed=rollback_confirmed,
+            final_state_uncertain=uncertain,
+            structural_diff=structural_diff,
             region_snapshots=region_snapshots,
         )
 
