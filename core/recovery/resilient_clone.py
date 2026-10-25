@@ -115,7 +115,7 @@ class CloneMap:
             "blocks": [asdict(b) for b in self.blocks]
         }
         map_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = map_path.with_suffix(".map.tmp")
+        tmp_path = map_path.parent / f".{map_path.name}.tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(json.dumps(data, indent=2))
             f.flush()
@@ -188,9 +188,15 @@ class CloneMap:
                 log.warning("Mapa rejeitado: cobertura total de setores (%d) difere de total_sectors (%d)", expected_start, expected_sectors)
                 return None
 
+            # Validação estrita do tamanho do setor
+            map_sector_size = data.get("sector_size", SECTOR_SIZE)
+            if map_sector_size != SECTOR_SIZE:
+                log.warning("Mapa rejeitado: sector_size incompatível com a implementação (%s != %s)", map_sector_size, SECTOR_SIZE)
+                return None
+
             # Verificação de coerência com o arquivo físico de imagem
             rescued_in_map = sum(b.sector_count for b in blocks if b.status == "+")
-            expected_size = expected_sectors * data.get("sector_size", SECTOR_SIZE)
+            expected_size = expected_sectors * SECTOR_SIZE
             if rescued_in_map > 0:
                 if not expected_output.exists():
                     log.warning(
@@ -199,9 +205,9 @@ class CloneMap:
                     )
                     return None
                 actual_size = expected_output.stat().st_size
-                if actual_size < expected_size:
+                if actual_size != expected_size:
                     log.warning(
-                        "Mapa rejeitado: arquivo de imagem truncado detectado (%d bytes < %d bytes esperados para %d setores).",
+                        "Mapa rejeitado: discrepância no tamanho da imagem física (%d bytes != %d bytes esperados para %d setores).",
                         actual_size, expected_size, expected_sectors
                     )
                     return None
@@ -273,20 +279,34 @@ class ResilientCloner:
         assert_safe_source_and_destination(self.device_path, self.output_image_path)
 
         # Validação de segurança P0 do arquivo de mapa:
-        # 1. Impedir que map_path coincida com output_image_path (evitar destruição da imagem de saída)
+        # 1. Impedir que map_path ou qualquer de seus arquivos temporários coincida com output_image_path
+        tmp_map_1 = self.map_path.parent / f".{self.map_path.name}.tmp"
+        tmp_map_2 = self.map_path.with_suffix(".map.tmp")
+
         try:
-            if self.output_image_path.resolve() == self.map_path.resolve():
+            out_res = self.output_image_path.resolve()
+            if (
+                out_res == self.map_path.resolve()
+                or out_res == tmp_map_1.resolve()
+                or out_res == tmp_map_2.resolve()
+            ):
                 raise ValueError(
                     f"Conflito crítico: o arquivo de mapa (map_path) não pode ser idêntico à imagem de destino "
-                    f"({self.map_path}). Salvar o mapa sobre a imagem destruiria os dados resgatados."
+                    f"nem colidir com seu temporário ({self.map_path} vs {self.output_image_path}). Salvar o mapa sobre a imagem destruiria os dados resgatados."
                 )
         except OSError:
-            if str(self.output_image_path).strip().lower() == str(self.map_path).strip().lower():
-                raise ValueError("O arquivo de mapa (map_path) não pode coincidir com a imagem de destino.")
+            out_str = str(self.output_image_path).strip().lower()
+            if out_str in (
+                str(self.map_path).strip().lower(),
+                str(tmp_map_1).strip().lower(),
+                str(tmp_map_2).strip().lower(),
+            ):
+                raise ValueError("O arquivo de mapa (map_path) ou seu temporário não pode coincidir com a imagem de destino.")
 
         # 2. Impedir que o mapa ou seus temporários sejam gravados no mesmo disco físico de origem
         assert_safe_source_and_destination(self.device_path, self.map_path)
-        assert_safe_source_and_destination(self.device_path, self.map_path.with_suffix(".map.tmp"))
+        assert_safe_source_and_destination(self.device_path, tmp_map_1)
+        assert_safe_source_and_destination(self.device_path, tmp_map_2)
 
         # Verifica espaço em disco disponível no destino
         try:

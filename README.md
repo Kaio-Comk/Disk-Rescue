@@ -1,7 +1,7 @@
 # 🛠️ DiskRescue
 
 [![Release](https://img.shields.io/github/v/release/Kaio-Comk/Disk-Rescue?color=blue&label=Vers%C3%A3o)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)
-[![Tests](https://img.shields.io/badge/Testes-26%2F26%20Aprovados-success)](https://github.com/Kaio-Comk/Disk-Rescue)
+[![Tests](https://img.shields.io/badge/Testes-50%2F50%20Aprovados-success)](https://github.com/Kaio-Comk/Disk-Rescue)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-blue?logo=python)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Plataforma-Windows%2011%20Fluent-0078d4?logo=windows)](https://github.com/Kaio-Comk/Disk-Rescue)
 [![License](https://img.shields.io/badge/Licen%C3%A7a-MIT-green)](LICENSE)
@@ -17,12 +17,12 @@ A aplicação conta com uma interface desktop moderna no padrão **Windows 11 Fl
 ## ⚡ Download Imediato do Executável
 
 Baixe a versão mais recente pronta para uso:
-👉 **[Baixar DiskRescue v0.2.2 (Executável Portátil)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)**
+👉 **[Baixar DiskRescue v0.2.3 (Executável Portátil)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)**
 
 * **Portátil e Autônomo:** Não requer instalação de Python nem dependências externas (~11.6 MB).
 * **Integridade Criptográfica (SHA-256):**
   ```text
-  B2B638EDF207891DC86D42FD82D3C9814CB848752DF51EE5D173A7874928DBC7
+  2863FCBF13410F82BA8D7682D03B518AD455425E19E74598CF987A6B8F02E4E3
   ```
 * **Elevação UAC Automática:** Manifest embutido solicita privilégios de Administrador ao iniciar, garantindo acesso direto de baixo nível (`\\.\PhysicalDriveX`).
 

@@ -118,3 +118,18 @@ def test_smart_windows_reliability_counters_remain_segregated_and_unknown():
     assert report.windows_reliability is not None
     assert report.windows_reliability["Wear"] == 5
     assert any("subsistema windows" in e.lower() for e in report.evidencia_observada)
+
+
+def test_smart_unknown_when_only_uninformative_attributes_present():
+    """P2 Teste: Garante que atributos sem indicadores críticos de saúde retornem UNKNOWN (não verde)."""
+    report = analyze_smart_data(
+        device_id=7,
+        device_path=r"\\.\PhysicalDrive7",
+        model="Generic Flash Disk",
+        serial="GEN001",
+        raw_attributes={999: 42, 9: 500},  # Apenas horas de uso e ID desconhecido
+        temperature_c=30
+    )
+    assert report.risk_level == SmartRiskLevel.UNKNOWN
+    assert any("nenhum atributo crítico" in e.lower() for e in report.evidencia_observada)
+

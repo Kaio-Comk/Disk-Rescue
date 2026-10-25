@@ -89,6 +89,23 @@ def parse_gpt(f, sector_size: int = DEFAULT_SECTOR_SIZE) -> GPTTable | None:
         disk_guid, part_lba, num_entries, entry_size, part_crc
     ) = struct.unpack("<IIIIQQQQ16sQIII", header_data[8:92])
 
+    # Validação estrita dos limites de entrada para evitar estouro de memória em discos corrompidos
+    if not (92 <= h_size <= sector_size):
+        log.debug("Cabeçalho GPT inválido: header_size=%d fora do limite (92..%d).", h_size, sector_size)
+        return None
+
+    if not (128 <= entry_size <= 4096) or (entry_size % 8 != 0):
+        log.debug("Cabeçalho GPT inválido: entry_size=%d fora do limite aceitável.", entry_size)
+        return None
+
+    if not (1 <= num_entries <= 1024):
+        log.debug("Cabeçalho GPT inválido: num_entries=%d fora do limite (1..1024).", num_entries)
+        return None
+
+    if first_usable >= last_usable or part_lba < 2:
+        log.debug("Cabeçalho GPT inválido: first_usable=%d >= last_usable=%d ou part_lba=%d.", first_usable, last_usable, part_lba)
+        return None
+
     # Validação do CRC do cabeçalho (com o campo de CRC zerado durante o cálculo)
     test_hdr = bytearray(header_data[:h_size])
     test_hdr[16:20] = b"\x00\x00\x00\x00"
@@ -166,6 +183,37 @@ def rebuild_gpt(
     struct.pack_into("<I", new_header, 16, new_header_crc)
 
     return bytes(new_header), bytes(entries_data)
+
+
+def rebuild_backup_gpt(
+    gpt: GPTTable,
+    updated_partitions: list[GPTPartitionEntry],
+    sector_size: int = DEFAULT_SECTOR_SIZE
+) -> tuple[bytes, bytes, int]:
+    """
+    Reconstrói o cabeçalho e as entradas da GPT de Backup (localizada no fim do disco).
+    Retorna (backup_header_bytes, entries_data, backup_entries_lba).
+    """
+    entries_data = bytearray(gpt.num_partition_entries * gpt.partition_entry_size)
+    for p in updated_partitions:
+        idx = p.index - 1
+        if 0 <= idx < gpt.num_partition_entries:
+            start = idx * gpt.partition_entry_size
+            entries_data[start : start + gpt.partition_entry_size] = p.to_bytes(gpt.partition_entry_size)
+
+    new_part_crc = zlib.crc32(entries_data) & 0xFFFFFFFF
+    entries_sectors = (len(entries_data) + sector_size - 1) // sector_size
+    backup_entries_lba = gpt.backup_lba - entries_sectors
+
+    backup_header = bytearray(gpt.raw_header)
+    struct.pack_into("<QQ", backup_header, 24, gpt.backup_lba, gpt.current_lba)
+    struct.pack_into("<Q", backup_header, 72, backup_entries_lba)
+    struct.pack_into("<I", backup_header, 88, new_part_crc)
+    backup_header[16:20] = b"\x00\x00\x00\x00"
+    new_header_crc = zlib.crc32(backup_header[:gpt.header_size]) & 0xFFFFFFFF
+    struct.pack_into("<I", backup_header, 16, new_header_crc)
+
+    return bytes(backup_header), bytes(entries_data), backup_entries_lba
 
 
 def create_lba_snapshot(device_path: str, output_path: Path, sector_count: int = 34, sector_size: int = DEFAULT_SECTOR_SIZE) -> bool:

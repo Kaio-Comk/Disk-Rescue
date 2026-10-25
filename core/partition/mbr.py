@@ -149,8 +149,25 @@ def repair_mbr_partition(
     backup_dir: Path | None = None
 ) -> bool:
     """Atualiza de forma cirúrgica uma entrada MBR corrompida com backup prévio de LBA 0."""
+    if not (1 <= target_index <= 4):
+        log.error("Índice de partição MBR inválido: %d (deve ser entre 1 e 4).", target_index)
+        return False
+
+    if new_start_lba < 1 or new_sector_count <= 0 or (new_start_lba + new_sector_count) > 0xFFFFFFFF:
+        log.error("Limites de partição MBR inválidos: LBA %d, contagem %d.", new_start_lba, new_sector_count)
+        return False
+
     backup_dir = backup_dir or Path("backups")
     backup_dir.mkdir(parents=True, exist_ok=True)
+
+    # Proteção P0: Não gravar backup de segurança no próprio disco de origem
+    try:
+        from core.hardware.device_resolver import assert_safe_source_and_destination
+        assert_safe_source_and_destination(device_path, backup_dir, is_directory=True)
+    except Exception as exc:
+        log.error("Bloqueio de segurança no diretório de backup: %s", exc)
+        return False
+
     clean_name = device_path.replace("\\", "_").replace("/", "_").replace(":", "").replace(".", "").strip("_")
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     backup_path = backup_dir / f"mbr_backup_{clean_name[-30:]}_{timestamp}.bin"
@@ -162,27 +179,56 @@ def repair_mbr_partition(
             if len(cur_mbr_bytes) != 512:
                 return False
 
-            # Salva snapshot
-            backup_path.write_bytes(cur_mbr_bytes)
-
             table = parse_mbr(cur_mbr_bytes)
             if not table:
                 return False
 
-            # Atualiza partição
+            # Valida sobreposição com outras partições ativas
+            new_end_lba = new_start_lba + new_sector_count - 1
+            for p in table.partitions:
+                if p.index != target_index and p.type_id != 0x00 and p.sector_count > 0:
+                    other_start = p.start_lba
+                    other_end = p.start_lba + p.sector_count - 1
+                    if max(new_start_lba, other_start) <= min(new_end_lba, other_end):
+                        log.error(
+                            "Conflito de geometria MBR: a partição %d (LBA %d..%d) sobrepõe a partição %d (LBA %d..%d).",
+                            target_index, new_start_lba, new_end_lba, p.index, other_start, other_end
+                        )
+                        return False
+
+            # Atualiza partição alvo
+            found = False
             for p in table.partitions:
                 if p.index == target_index:
+                    found = True
                     p.start_lba = new_start_lba
                     p.sector_count = new_sector_count
                     p.type_id = new_type_id
                     p.type_name = MBR_TYPES.get(new_type_id, "Partição Restaurada")
                     break
 
+            if not found:
+                log.error("Partição com índice %d não encontrada na tabela MBR.", target_index)
+                return False
+
+            # Salva snapshot de segurança somente após validar parâmetros e geometria
+            backup_path.write_bytes(cur_mbr_bytes)
+
             new_mbr_bytes = rebuild_mbr_bytes(table.partitions, table.bootstrap_code)
 
             f.seek(0)
             f.write(new_mbr_bytes)
             f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+
+            # Verificação pós-escrita imediata
+            f.seek(0)
+            written = f.read(512)
+            if written != new_mbr_bytes:
+                raise OSError("Verificação pós-escrita falhou: LBA 0 diverge dos dados gravados.")
 
         log.info("Entrada MBR %d restaurada com sucesso.", target_index)
 

@@ -75,8 +75,9 @@ def get_physical_drive_number(target: str | Path) -> Optional[int]:
     """
     target_str = str(target).strip()
 
-    # 1. Checagem direta por regex PhysicalDriveN
-    match = re.search(r"PhysicalDrive(\d+)", target_str, re.IGNORECASE)
+    # 1. Checagem direta por regex PhysicalDriveN ancorada estritamente ao formato de dispositivo Win32
+    # Ex: r"\\.\PhysicalDrive0", r"\\?\PhysicalDrive0" ou "PhysicalDrive0"
+    match = re.match(r"^(?:[\\/]{2}[\.\?][\\/])?PhysicalDrive(\d+)$", target_str, re.IGNORECASE)
     if match:
         return int(match.group(1))
 

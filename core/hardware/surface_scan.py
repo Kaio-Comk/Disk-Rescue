@@ -40,6 +40,13 @@ def scan_surface_latency(
     cancel_check: Optional[Callable[[], bool]] = None
 ) -> SurfaceScanSummary:
     """Varre a superfície medindo a latência precisa de resposta de cada bloco."""
+    if start_lba < 0:
+        raise ValueError("start_lba deve ser maior ou igual a zero.")
+    if max_sectors <= 0:
+        raise ValueError("max_sectors deve ser estritamente positivo.")
+    if block_sectors <= 0:
+        raise ValueError("block_sectors deve ser estritamente positivo.")
+
     summary = SurfaceScanSummary()
     current_lba = start_lba
     end_lba = start_lba + max_sectors

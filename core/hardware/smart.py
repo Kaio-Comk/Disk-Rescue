@@ -158,12 +158,23 @@ def analyze_smart_data(
         "A ausência de erros registrados não comprova que a mídia magnética ou células flash estejam 100% íntegras."
     ]
 
+    # Regra 0: Validação de presença de indicadores mínimos para classificação Verde
+    CRITICAL_HEALTH_IDS = {1, 5, 10, 187, 188, 196, 197, 198, 199}
+    has_critical_indicators = any(aid in raw_attributes for aid in CRITICAL_HEALTH_IDS)
+
     messages = []
-    risk = SmartRiskLevel.GREEN
-    recommendation = (
-        "O disco apresenta parâmetros monitorados saudáveis e estáveis. "
-        "Recomenda-se realizar snapshot de segurança antes de qualquer intervenção estrutural ou particionamento."
-    )
+    if not has_critical_indicators:
+        risk = SmartRiskLevel.UNKNOWN
+        evidencias.append("Nenhum atributo crítico de saúde física (IDs 5, 197, 198, 199, etc.) está presente na telemetria obtida.")
+        hipoteses.append("O dispositivo ou a interface de comunicação não expôs atributos fundamentais de integridade mecânica.")
+        limitacoes.append("A ausência de contadores críticos impede atestar se a superfície ou controladora estão sadias.")
+        recommendation = "Estado de integridade indeterminado. Execute varredura de superfície para avaliar a resposta dos blocos."
+    else:
+        risk = SmartRiskLevel.GREEN
+        recommendation = (
+            "O disco apresenta parâmetros monitorados saudáveis e estáveis. "
+            "Recomenda-se realizar snapshot de segurança antes de qualquer intervenção estrutural ou particionamento."
+        )
 
     # Regra 1: Mau contato de Cabo SATA / USB
     if crc_err > 0 and reallocated == 0 and pending == 0 and uncorrectable == 0:

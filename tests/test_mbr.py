@@ -79,3 +79,26 @@ def test_repair_mbr_partition_in_file(tmp_path: Path):
     table_after = parse_mbr(mbr_file.read_bytes())
     assert table_after.partitions[0].start_lba == 2048
     assert table_after.partitions[0].sector_count == 50000
+
+
+def test_repair_mbr_rejects_invalid_index_and_overlapping(tmp_path: Path):
+    """P1 Teste: Garante que repair_mbr_partition recuse índices inexistentes e sobreposições de partição."""
+    mbr_file = tmp_path / "mock_mbr_overlap.bin"
+    initial_parts = [
+        MBRPartitionEntry(1, True, 0x07, "NTFS", 2048, 10000),   # LBA 2048..12047
+        MBRPartitionEntry(2, False, 0x0B, "FAT32", 20000, 10000) # LBA 20000..29999
+    ]
+    mbr_file.write_bytes(rebuild_mbr_bytes(initial_parts))
+    backup_dir = tmp_path / "backups_validation"
+
+    # 1. Índice fora do intervalo (1..4)
+    assert repair_mbr_partition(str(mbr_file), target_index=5, new_start_lba=35000, new_sector_count=5000, backup_dir=backup_dir) is False
+    assert repair_mbr_partition(str(mbr_file), target_index=0, new_start_lba=35000, new_sector_count=5000, backup_dir=backup_dir) is False
+
+    # 2. Conflito de sobreposição: Tenta redimensionar partição 1 para LBA 2048..25000 (colide com partição 2 que começa em 20000)
+    assert repair_mbr_partition(str(mbr_file), target_index=1, new_start_lba=2048, new_sector_count=20000, backup_dir=backup_dir) is False
+
+    # 3. Limites inválidos (start_lba < 1 ou count <= 0)
+    assert repair_mbr_partition(str(mbr_file), target_index=1, new_start_lba=0, new_sector_count=1000, backup_dir=backup_dir) is False
+    assert repair_mbr_partition(str(mbr_file), target_index=1, new_start_lba=1000, new_sector_count=0, backup_dir=backup_dir) is False
+

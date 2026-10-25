@@ -5,6 +5,7 @@ Extrai imagens, documentos e mídias diretamente de setores brutos com suporte a
 """
 from __future__ import annotations
 
+import io
 import logging
 import os
 import struct
@@ -62,13 +63,20 @@ class FileCarver:
             resolved_source_id = str(source_identifier)
         elif hasattr(device_path, "name") and isinstance(device_path.name, (str, bytes)):
             resolved_source_id = str(device_path.name)
+        elif hasattr(device_path, "_underlying") and hasattr(device_path._underlying, "name") and isinstance(device_path._underlying.name, (str, bytes)):
+            resolved_source_id = str(device_path._underlying.name)
 
         if resolved_source_id:
             assert_safe_source_and_destination(resolved_source_id, self.output_dir, is_directory=True)
         else:
-            # Fluxos binários de teste mock são permitidos (ex: BytesIO ou StrictReadOnlyDeviceStream)
-            type_name = type(device_path).__name__
-            if type_name not in ("BytesIO", "StrictReadOnlyDeviceStream"):
+            # Apenas fluxos binários comprovadamente sintéticos em memória são isentos de identificador
+            is_synthetic_bytes = isinstance(device_path, io.BytesIO)
+            if not is_synthetic_bytes and hasattr(device_path, "_underlying"):
+                underlying = getattr(device_path, "_underlying")
+                if isinstance(underlying, (io.BytesIO, bytes, bytearray)):
+                    is_synthetic_bytes = True
+
+            if not is_synthetic_bytes:
                 raise ValueError(
                     "BLOQUEIO FAIL-CLOSED: O FileCarver recebeu um fluxo binário sem identificador de origem comprovável "
                     "(source_identifier). Para prevenir gravação acidental no disco de origem, informe o caminho do dispositivo."
@@ -382,13 +390,19 @@ class FileCarver:
                 max_sectors = stream.tell() // SECTOR_SIZE
                 stream.seek(0)
 
+            overlap = b""
+            MAX_HEADER_OVERLAP = 16
+            last_extracted_offset = -1
+
             while current_lba < max_sectors and not self.cancel_requested:
                 chunk_start_byte = current_lba * SECTOR_SIZE
                 stream.seek(chunk_start_byte)
-                raw_chunk = stream.read(chunk_bytes)
-                if not raw_chunk:
+                new_bytes = stream.read(chunk_bytes)
+                if not new_bytes:
                     break
 
+                overlap_len = len(overlap)
+                raw_chunk = overlap + new_bytes
                 chunk_len = len(raw_chunk)
                 pos = 0
 
@@ -396,7 +410,7 @@ class FileCarver:
                     earliest_sig = None
                     earliest_idx = -1
 
-                    # Localiza o cabeçalho mais próximo no buffer atual
+                    # Localiza o cabeçalho mais próximo no buffer atual (incluindo sobreposição com o bloco anterior)
                     for kind, ext, header_sig, footer_sig, max_size in self.SIGNATURES:
                         idx = raw_chunk.find(header_sig, pos)
                         if idx != -1:
@@ -409,7 +423,13 @@ class FileCarver:
                         break
 
                     kind, ext, header_sig, footer_sig, max_size = earliest_sig
-                    file_start_byte = chunk_start_byte + earliest_idx
+                    file_start_byte = (chunk_start_byte - overlap_len) + earliest_idx
+
+                    # Previne re-extração se o início estiver na zona de sobreposição e já tiver sido processado
+                    if file_start_byte <= last_extracted_offset:
+                        pos = earliest_idx + len(header_sig)
+                        continue
+
                     file_counter += 1
 
                     # Executa extração com acumulação contínua além da fronteira do bloco
@@ -425,14 +445,17 @@ class FileCarver:
                     )
 
                     if carved:
+                        last_extracted_offset = file_start_byte
                         # Avança o cursor além do arquivo extraído para otimizar
                         pos = earliest_idx + max(len(header_sig), carved.size_bytes)
                         # Re-sincroniza stream para onde estávamos
-                        stream.seek(chunk_start_byte + min(pos, chunk_len))
+                        stream.seek(chunk_start_byte + min(max(0, pos - overlap_len), len(new_bytes)))
                     else:
                         pos = earliest_idx + len(header_sig)
 
-                current_lba += (chunk_len // SECTOR_SIZE)
+                # Mantém buffer de sobreposição dos últimos bytes para não perder assinaturas divididas na fronteira
+                overlap = raw_chunk[-MAX_HEADER_OVERLAP:] if len(raw_chunk) >= MAX_HEADER_OVERLAP else raw_chunk
+                current_lba += (len(new_bytes) // SECTOR_SIZE)
                 if progress_cb:
                     progress_cb(current_lba, max_sectors, len(self.valid_files))
 

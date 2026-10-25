@@ -24,3 +24,23 @@ def test_surface_scan_measures_blocks(tmp_path: Path):
     assert len(results) == 4
     assert summary.bad_count == 0
     assert (summary.fast_count + summary.good_count + summary.slow_count) == 4
+
+
+def test_surface_scan_validates_positive_parameters(tmp_path: Path):
+    """P1 Teste: Garante que parâmetros inválidos ou que gerariam loops infinitos sejam recusados."""
+    import pytest
+    disk_file = tmp_path / "mock_surface.img"
+    disk_file.write_bytes(b"\x00" * 4096)
+
+    # block_sectors <= 0
+    with pytest.raises(ValueError, match="block_sectors deve ser estritamente positivo"):
+        scan_surface_latency(str(disk_file), block_sectors=0)
+
+    # max_sectors <= 0
+    with pytest.raises(ValueError, match="max_sectors deve ser estritamente positivo"):
+        scan_surface_latency(str(disk_file), max_sectors=0)
+
+    # start_lba < 0
+    with pytest.raises(ValueError, match="start_lba deve ser maior ou igual a zero"):
+        scan_surface_latency(str(disk_file), start_lba=-1)
+

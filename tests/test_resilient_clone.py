@@ -2,6 +2,7 @@
 tests/test_resilient_clone.py — Testes unitários aprofundados para o motor de clonagem resiliente.
 Valida verificação LBA exata setor por setor, sem lacunas silenciosas, e retomada atômica (resume).
 """
+import json
 import struct
 from pathlib import Path
 import pytest
@@ -310,3 +311,74 @@ def test_cloner_rejects_map_path_on_same_physical_disk_as_source(monkeypatch, tm
             total_sectors=100,
             map_path=r"C:\Resgate\disco.map"
         )
+
+
+def test_cloner_rejects_map_temporary_collision_with_output_image(tmp_path: Path):
+    """
+    P0 Teste Crítico: Garante que um arquivo temporário de mapa (ex: disco.map.tmp)
+    não colida com a imagem de saída especificada pelo usuário, impedindo que save_map
+    trunque a imagem recuperada ao persistir o mapa.
+    """
+    # Imagem nomeada propositalmente como o temporário do mapa
+    img_colliding = tmp_path / ".disco.map.tmp"
+    map_target = tmp_path / "disco.map"
+
+    with pytest.raises(ValueError, match="colidir com seu temporário"):
+        ResilientCloner(
+            device_path="mock://drive",
+            output_image_path=img_colliding,
+            total_sectors=100,
+            map_path=map_target
+        )
+
+
+def test_clone_map_rejects_mismatched_sector_size(tmp_path: Path):
+    """P1 Teste: Garante que um mapa com sector_size incompatível (ex: 4096) seja rejeitado."""
+    map_file = tmp_path / "test_4k.map"
+    img_file = tmp_path / "test_4k.img"
+    img_file.write_bytes(b"\x00" * (10 * 512))
+
+    data = {
+        "version": "2.0",
+        "device_path": "mock://dev",
+        "output_image": str(img_file),
+        "total_sectors": 10,
+        "sector_size": 4096,  # Setor incompatível
+        "blocks": [{"start_lba": 0, "sector_count": 10, "status": "+"}]
+    }
+    map_file.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = CloneMap.load_map(
+        map_path=map_file,
+        expected_device="mock://dev",
+        expected_output=img_file,
+        expected_sectors=10
+    )
+    assert loaded is None
+
+
+def test_clone_map_rejects_oversized_image(tmp_path: Path):
+    """P1 Teste: Garante que um arquivo de imagem físico com tamanho divergente (maior que o mapa) seja rejeitado."""
+    map_file = tmp_path / "test_over.map"
+    img_file = tmp_path / "test_over.img"
+    # Grava 20 setores quando o mapa diz ter apenas 10
+    img_file.write_bytes(b"\x00" * (20 * 512))
+
+    data = {
+        "version": "2.0",
+        "device_path": "mock://dev",
+        "output_image": str(img_file),
+        "total_sectors": 10,
+        "sector_size": 512,
+        "blocks": [{"start_lba": 0, "sector_count": 10, "status": "+"}]
+    }
+    map_file.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = CloneMap.load_map(
+        map_path=map_file,
+        expected_device="mock://dev",
+        expected_output=img_file,
+        expected_sectors=10
+    )
+    assert loaded is None
+

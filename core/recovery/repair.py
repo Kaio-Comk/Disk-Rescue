@@ -42,8 +42,18 @@ def repair_gpt_partition_offset(
 ) -> RepairResult:
     """Corrige o offset de início e fim de uma partição na tabela GPT com backup prévio de segurança."""
     backup_dir = backup_dir or Path("backups")
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    # Proteção P0: Não gravar backup de segurança no próprio disco de origem
+    try:
+        from core.hardware.device_resolver import assert_safe_source_and_destination
+        assert_safe_source_and_destination(device_path, backup_dir, is_directory=True)
+    except Exception as exc:
+        log.error("Bloqueio de segurança no diretório de backup: %s", exc)
+        return RepairResult(success=False, message=f"Diretório de backup inseguro: {exc}")
+
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    clean_name = device_path.replace("\\", "_").replace(".", "").replace("/", "_").strip("_")
+    clean_name = device_path.replace("\\", "_").replace("/", "_").replace(":", "").replace(".", "").strip("_")[-30:]
     backup_path = backup_dir / f"backup_gpt_{clean_name}_{timestamp}.bin"
 
     # 1. Snapshot de segurança (LBA 0 a 33)
@@ -75,23 +85,61 @@ def repair_gpt_partition_offset(
             new_start = discovered_fs.start_lba
             new_end = discovered_fs.end_lba
 
+            # Valida limites utilizáveis da GPT
+            if new_start < gpt.first_usable_lba or new_end > gpt.last_usable_lba or new_start > new_end:
+                return RepairResult(
+                    success=False,
+                    message=f"Limites inválidos: LBA {new_start}..{new_end} ultrapassa área utilizável ({gpt.first_usable_lba}..{gpt.last_usable_lba}).",
+                    backup_file=backup_path
+                )
+
+            # Valida sobreposição com outras partições ativas
+            for p in gpt.partitions:
+                if p.index != target_partition_index and not p.is_empty:
+                    if max(new_start, p.first_lba) <= min(new_end, p.last_lba):
+                        return RepairResult(
+                            success=False,
+                            message=f"Conflito de partição: o novo intervalo LBA {new_start}..{new_end} sobrepõe a partição {p.index} (LBA {p.first_lba}..{p.last_lba}).",
+                            backup_file=backup_path
+                        )
+
             log.info("Ajustando partição %d: LBA %d -> LBA %d..%d", target_partition_index, old_start, new_start, new_end)
 
-            # Atualiza o objeto da partição
+            # Atualiza o objeto da partição preservando flags existentes (remove apenas flag de ocultação se presente)
             part_to_update.first_lba = new_start
             part_to_update.last_lba = new_end
-            part_to_update.flags = 0x0000000000000000 # Habilita montagem e letra automática
+            part_to_update.flags = part_to_update.flags & ~0x8000000000000000
 
-            # 3. Recalcular e reconstruir cabeçalho e tabela com novos CRCs
+            # 3. Recalcular cabeçalho primário, entradas e cabeçalho de backup (LBA final)
             new_header_bytes, new_entries_bytes = rebuild_gpt(gpt, gpt.partitions, sector_size=sector_size)
+            from core.partition.gpt import rebuild_backup_gpt
+            bkp_header_bytes, bkp_entries_bytes, bkp_entries_lba = rebuild_backup_gpt(gpt, gpt.partitions, sector_size=sector_size)
 
-            # 4. Gravação segura nos LBAs primários (LBA 1 e LBA 2..33)
+            # 4. Gravação nos LBAs primários (LBA 1 e LBA 2..33)
             f.seek(1 * sector_size)
             f.write(new_header_bytes)
 
             f.seek(gpt.partition_entries_lba * sector_size)
             f.write(new_entries_bytes)
+
+            # 5. Gravação da cópia de backup no fim do disco
+            if gpt.backup_lba > 0 and bkp_entries_lba > 0:
+                f.seek(bkp_entries_lba * sector_size)
+                f.write(bkp_entries_bytes)
+                f.seek(gpt.backup_lba * sector_size)
+                f.write(bkp_header_bytes)
+
             f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+
+            # Verificação pós-escrita imediata
+            f.seek(1 * sector_size)
+            read_hdr = f.read(len(new_header_bytes))
+            if read_hdr != new_header_bytes:
+                raise OSError("Verificação pós-escrita falhou no cabeçalho GPT primário.")
 
         log.info("Tabela GPT primária corrigida e gravada com sucesso.")
 

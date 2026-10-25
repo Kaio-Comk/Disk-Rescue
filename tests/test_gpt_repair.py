@@ -1,6 +1,7 @@
 """
 tests/test_gpt_repair.py — Testes unitários para o parser e motor de reparo GPT.
 """
+import io
 import struct
 import zlib
 from pathlib import Path
@@ -122,3 +123,81 @@ def test_rebuild_gpt_corrige_offset_e_recalcula_crc(tmp_path):
     assert gpt_corrigido.partitions[1].first_lba == 567296
     assert gpt_corrigido.partitions[1].last_lba == 945291255
     assert gpt_corrigido.partitions[1].no_drive_letter is False
+
+
+def test_gpt_parser_rejects_malformed_structures(tmp_path):
+    """P1 Teste: Garante que o parser GPT rejeite tamanhos incoerentes e evite alocação abusiva de RAM."""
+    raw = _criar_gpt_sintetico()
+    
+    # 1. header_size menor que 92 bytes
+    corrupt_hsize = bytearray(raw)
+    struct.pack_into("<I", corrupt_hsize, 512 + 12, 50)  # h_size = 50
+    f1 = io.BytesIO(corrupt_hsize)
+    assert parse_gpt(f1) is None
+
+    # 2. num_entries astronômico (ex: 50.000 entradas)
+    corrupt_entries = bytearray(raw)
+    struct.pack_into("<I", corrupt_entries, 512 + 80, 50000)
+    f2 = io.BytesIO(corrupt_entries)
+    assert parse_gpt(f2) is None
+
+    # 3. entry_size inválido (ex: 10 bytes)
+    corrupt_esize = bytearray(raw)
+    struct.pack_into("<I", corrupt_esize, 512 + 84, 10)
+    f3 = io.BytesIO(corrupt_esize)
+    assert parse_gpt(f3) is None
+
+
+def test_repair_gpt_partition_offset_syncs_backup_and_rejects_overlaps(tmp_path):
+    """
+    P1 Teste: Valida que repair_gpt_partition_offset sincroniza a cópia de backup no fim do disco
+    e rejeita sobreposições e limites inválidos.
+    """
+    from core.filesystem.scanner import DiscoveredFilesystem
+    from core.recovery.repair import repair_gpt_partition_offset
+
+    # Cria disco sintético com espaço suficiente para as partições
+    total_sectors = 100_000
+    disk_bytes = bytearray(64 * 512)
+    base_gpt = _criar_gpt_sintetico()
+    disk_bytes[:len(base_gpt)] = base_gpt
+    disk_bytes.extend(b"\x00" * ((total_sectors - 64) * 512))
+
+    # Atualiza cabeçalho primário: backup no LBA 99999 e last_usable no LBA 90000
+    struct.pack_into("<Q", disk_bytes, 512 + 32, 99999)  # backup_lba = 99999
+    struct.pack_into("<Q", disk_bytes, 512 + 48, 90000)  # last_usable = 90000
+    # Recalcula CRC do cabeçalho primário
+    disk_bytes[512 + 16 : 512 + 20] = b"\x00\x00\x00\x00"
+    h_crc = zlib.crc32(disk_bytes[512 : 512 + 92]) & 0xFFFFFFFF
+    struct.pack_into("<I", disk_bytes, 512 + 16, h_crc)
+
+    img = tmp_path / "mock_disk_gpt_full.bin"
+    img.write_bytes(disk_bytes)
+    backup_dir = tmp_path / "backups_gpt"
+
+    # 1. Tenta reparar para fora da área utilizável (LBA 91000..92000 > last_usable 90000)
+    fs_out_of_bounds = DiscoveredFilesystem("NTFS", start_lba=91000, total_sectors=1000, size_bytes=1000 * 512)
+    res_err = repair_gpt_partition_offset(str(img), target_partition_index=2, discovered_fs=fs_out_of_bounds, backup_dir=backup_dir)
+    assert res_err.success is False
+    assert "ultrapassa área utilizável" in res_err.message
+
+    # 2. Tenta reparar para sobrepor partição 1 (partição 1 está em 2048..34815; tenta 2000..3000)
+    fs_overlap = DiscoveredFilesystem("NTFS", start_lba=2000, total_sectors=1001, size_bytes=1001 * 512)
+    res_overlap = repair_gpt_partition_offset(str(img), target_partition_index=2, discovered_fs=fs_overlap, backup_dir=backup_dir)
+    assert res_overlap.success is False
+    assert "sobrepõe a partição 1" in res_overlap.message
+
+    # 3. Reparo válido em LBA 40000..50000 (dentro dos limites e sem sobreposição)
+    fs_valid = DiscoveredFilesystem("NTFS", start_lba=40000, total_sectors=10001, size_bytes=10001 * 512)
+    res_ok = repair_gpt_partition_offset(str(img), target_partition_index=2, discovered_fs=fs_valid, backup_dir=backup_dir)
+    assert res_ok.success is True
+
+    # Verifica se os bytes da GPT primária foram atualizados
+    with open(img, "rb") as f:
+        reopened = parse_gpt(f)
+    assert reopened is not None
+    assert reopened.partitions[1].first_lba == 40000
+    assert reopened.partitions[1].last_lba == 50000
+    # Verifica que flags originais foram preservadas
+    assert reopened.partitions[1].flags == 0x0
+

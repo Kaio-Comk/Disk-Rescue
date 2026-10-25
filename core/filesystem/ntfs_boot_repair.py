@@ -120,6 +120,15 @@ def restore_ntfs_boot_from_backup(
 
     backup_dir = backup_dir or Path("backups")
     backup_dir.mkdir(parents=True, exist_ok=True)
+
+    # Proteção P0: Não gravar backup de segurança no próprio disco sob reparo
+    try:
+        from core.hardware.device_resolver import assert_safe_source_and_destination
+        assert_safe_source_and_destination(device_path, backup_dir, is_directory=True)
+    except Exception as exc:
+        log.error("Bloqueio de segurança no diretório de backup: %s", exc)
+        return BootRepairResult(success=False, message=f"Diretório de backup inseguro: {exc}")
+
     clean_name = device_path.replace("\\", "_").replace(".", "").replace("/", "_").strip("_")
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     snapshot_path = backup_dir / f"corrupted_vbr_{clean_name}_{timestamp}.bin"
@@ -129,6 +138,8 @@ def restore_ntfs_boot_from_backup(
         with open(device_path, "r+b") as f:
             f.seek(diag.primary_lba * sector_size)
             corrupted_data = f.read(sector_size)
+            if len(corrupted_data) != sector_size:
+                return BootRepairResult(success=False, message="Leitura incompleta do setor primário para snapshot.")
             snapshot_path.write_bytes(corrupted_data)
 
             # 2. Ler o setor de backup
@@ -142,6 +153,16 @@ def restore_ntfs_boot_from_backup(
             f.seek(diag.primary_lba * sector_size)
             f.write(valid_vbr)
             f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+
+            # Verificação pós-escrita imediata
+            f.seek(diag.primary_lba * sector_size)
+            verified = f.read(sector_size)
+            if verified != valid_vbr:
+                raise OSError("Verificação pós-escrita falhou: o Boot Sector gravado diverge do backup.")
 
         log.info("Boot sector primário NTFS restaurado com sucesso a partir do backup LBA %d", diag.backup_lba)
 

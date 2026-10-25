@@ -297,3 +297,53 @@ def test_carver_rejects_anonymous_unidentified_stream(tmp_path: Path):
         opaque = OpaqueStream(real_f)
         with pytest.raises(ValueError, match="BLOQUEIO FAIL-CLOSED"):
             FileCarver(opaque, tmp_path / "out_dir")
+
+
+def test_carver_detects_header_split_across_block_boundary(tmp_path: Path):
+    """
+    P1 Teste Crítico: Garante que um cabeçalho mágico dividido na fronteira exata entre dois blocos
+    de busca (ex: primeiros 4 bytes no final do bloco N e últimos 4 bytes no início do bloco N+1)
+    seja detectado com sucesso através do buffer de sobreposição.
+    """
+    import zlib
+    disk_file = tmp_path / "disk_split_header.img"
+    total_sectors = 10
+    sector_size = 512
+
+    # Constrói PNG mínimo válido
+    ihdr_data = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    ihdr_crc = zlib.crc32(b"IHDR" + ihdr_data) & 0xFFFFFFFF
+    ihdr_chunk = struct.pack(">I", len(ihdr_data)) + b"IHDR" + ihdr_data + struct.pack(">I", ihdr_crc)
+
+    raw_data = zlib.compress(b"\x00\x00\x00\x00")
+    idat_crc = zlib.crc32(b"IDAT" + raw_data) & 0xFFFFFFFF
+    idat_chunk = struct.pack(">I", len(raw_data)) + b"IDAT" + raw_data + struct.pack(">I", idat_crc)
+
+    iend_crc = zlib.crc32(b"IEND") & 0xFFFFFFFF
+    iend_chunk = struct.pack(">I", 0) + b"IEND" + struct.pack(">I", iend_crc)
+
+    png_body = ihdr_chunk + idat_chunk + iend_chunk
+    png_full = b"\x89PNG\r\n\x1a\n" + png_body
+
+    # Aloca disco sintético
+    disk_bytes = bytearray(total_sectors * sector_size)
+
+    # Injeta a assinatura PNG dividida:
+    # chunk_sectors será 1 (512 bytes).
+    # Primeiros 4 bytes (b"\x89PNG") colocados no offset 508..511 (fim do bloco 0)
+    # Restante colocado no offset 512.. (início do bloco 1)
+    split_offset = 508
+    disk_bytes[split_offset : split_offset + len(png_full)] = png_full
+    disk_file.write_bytes(disk_bytes)
+
+    out_dir = tmp_path / "carved_split_out"
+    carver = FileCarver(str(disk_file), out_dir, discard_invalid=True)
+    # Executa com chunk de exatamente 1 setor (512 bytes), forçando a quebra do cabeçalho
+    recovered = carver.scan(max_sectors=total_sectors, chunk_sectors=1)
+
+    assert len(recovered) == 1
+    png_res = recovered[0]
+    assert png_res.file_type == "PNG"
+    assert png_res.is_structurally_valid is True
+    assert png_res.saved_path.read_bytes() == png_full
+

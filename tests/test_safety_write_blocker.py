@@ -268,3 +268,26 @@ def test_volume_guid_conflict_detection(monkeypatch):
 
     # Unidades físicas diferentes (disco 0 vs disco 1) -> PERMITIDO!
     assert_safe_source_and_destination(vol_guid_path, r"D:\Resgate\disco.img")
+
+
+def test_physical_drive_number_not_fooled_by_filename():
+    r"""
+    P0 Teste Crítico: Garante que um arquivo comum cujo nome contenha 'PhysicalDrive1'
+    (ex: C:\Recuperacao\PhysicalDrive1.img) NÃO seja falsamente interpretado como o disco 1
+    por uma regex não ancorada.
+    """
+    # Nomes ancorados de dispositivos físicos
+    assert get_physical_drive_number(r"\\.\PhysicalDrive0") == 0
+    assert get_physical_drive_number(r"\\?\PhysicalDrive1") == 1
+    assert get_physical_drive_number("PhysicalDrive2") == 2
+    assert get_physical_drive_number(r"//./PhysicalDrive3") == 3
+
+    # Um nome de arquivo comum contendo a substring NÃO deve retornar o número da substring
+    # Se C: não puder ser consultado via IOCTL neste teste ou for outro disco, o importante
+    # é que NÃO retorne cegamente 1 por causa do nome do arquivo!
+    filename_drive = get_physical_drive_number(r"C:\Recuperacao\PhysicalDrive1.img")
+    # No Windows real, se C: for PhysicalDrive0, filename_drive será 0 (e NUNCA 1)
+    if filename_drive is not None:
+        c_drive = get_physical_drive_number(r"C:\\")
+        assert filename_drive == c_drive
+
