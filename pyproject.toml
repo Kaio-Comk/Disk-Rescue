@@ -17,6 +17,10 @@ dependencies = [
     "rich>=13.0.0",
 ]
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "gui*", "cli*"]
+
 [project.optional-dependencies]
 gui = [
     "sv-ttk>=2.6.0",
