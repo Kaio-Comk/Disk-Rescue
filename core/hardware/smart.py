@@ -41,11 +41,11 @@ class SmartReport:
     serial: str
     risk_level: SmartRiskLevel
     temperature_c: Optional[int]
-    reallocated_sectors: int = 0
-    pending_sectors: int = 0
-    uncorrectable_sectors: int = 0
-    crc_errors: int = 0
-    spin_retries: int = 0
+    reallocated_sectors: Optional[int] = None
+    pending_sectors: Optional[int] = None
+    uncorrectable_sectors: Optional[int] = None
+    crc_errors: Optional[int] = None
+    spin_retries: Optional[int] = None
     power_on_hours: Optional[int] = None
     attributes: Dict[int, SmartAttribute] = field(default_factory=dict)
     windows_reliability: Optional[Dict[str, int]] = None
@@ -108,11 +108,11 @@ def analyze_smart_data(
             serial=serial,
             risk_level=SmartRiskLevel.UNKNOWN,
             temperature_c=temperature_c,
-            reallocated_sectors=0,
-            pending_sectors=0,
-            uncorrectable_sectors=0,
-            crc_errors=0,
-            spin_retries=0,
+            reallocated_sectors=None,
+            pending_sectors=None,
+            uncorrectable_sectors=None,
+            crc_errors=None,
+            spin_retries=None,
             power_on_hours=None,
             attributes={},
             windows_reliability=windows_reliability,
@@ -127,11 +127,11 @@ def analyze_smart_data(
             acao_sugerida="Proceder com clonagem resiliente para resguardar os dados caso haja lentidão ou sintomas de falha."
         )
 
-    reallocated = raw_attributes.get(5, 0)
-    pending = raw_attributes.get(197, 0)
-    uncorrectable = raw_attributes.get(198, 0)
-    crc_err = raw_attributes.get(199, 0)
-    spin_retry = raw_attributes.get(10, 0)
+    reallocated = raw_attributes.get(5, None)
+    pending = raw_attributes.get(197, None)
+    uncorrectable = raw_attributes.get(198, None)
+    crc_err = raw_attributes.get(199, None)
+    spin_retry = raw_attributes.get(10, None)
     power_hours = raw_attributes.get(9, None)
 
     attributes: Dict[int, SmartAttribute] = {}
@@ -177,9 +177,15 @@ def analyze_smart_data(
         )
 
     # Regra 1: Mau contato de Cabo SATA / USB
-    if crc_err > 0 and reallocated == 0 and pending == 0 and uncorrectable == 0:
+    crc_val = crc_err or 0
+    realloc_val = reallocated or 0
+    pend_val = pending or 0
+    uncorr_val = uncorrectable or 0
+    spin_val = spin_retry or 0
+
+    if crc_val > 0 and realloc_val == 0 and pend_val == 0 and uncorr_val == 0:
         risk = SmartRiskLevel.YELLOW
-        evidencias.append(f"Contador UltraDMA CRC (ID 199/0xC7): {crc_err} erros registrados na interface.")
+        evidencias.append(f"Contador UltraDMA CRC (ID 199/0xC7): {crc_val} erros registrados na interface.")
         evidencias.append("Zero setores pendentes (C5), realocados (05) ou offline uncorrectable (C6) observados.")
         hipoteses.append(
             "Indício de degradação na comunicação física (cabo de dados SATA, conector oxidado ou porta na placa-mãe). "
@@ -190,7 +196,7 @@ def analyze_smart_data(
             "danos não detectados na controladora do próprio disco."
         )
         msg_cabo = (
-            f"🔍 INDÍCIO DE PROBLEMA DE CABO/INTERFACE: Detectados {crc_err} erros de CRC UltraDMA (ID 199/C7). "
+            f"🔍 INDÍCIO DE PROBLEMA DE CABO/INTERFACE: Detectados {crc_val} erros de CRC UltraDMA (ID 199/C7). "
             "Não foram observados setores pendentes ou realocados até o momento. Alta probabilidade de falha "
             "elétrica no cabo de dados SATA ou mau contato na porta. Recomenda-se substituir o cabo SATA e monitorar a integridade."
         )
@@ -201,17 +207,17 @@ def analyze_smart_data(
         )
 
     # Regra 2: Degradação de Superfície / Bad Sectors
-    if pending > 0 or reallocated > 0 or uncorrectable > 0:
+    if pend_val > 0 or realloc_val > 0 or uncorr_val > 0:
         evidencias.append(
-            f"Setores pendentes (197): {pending} | Setores remapeados (5): {reallocated} | "
-            f"Irrecuperáveis (198): {uncorrectable}"
+            f"Setores pendentes (197): {pend_val} | Setores remapeados (5): {realloc_val} | "
+            f"Irrecuperáveis (198): {uncorr_val}"
         )
-        if pending > 20 or reallocated > 100 or uncorrectable > 0:
+        if pend_val > 20 or realloc_val > 100 or uncorr_val > 0:
             risk = SmartRiskLevel.RED
             hipoteses.append("Degradação física severa da superfície magnética ou esgotamento de blocos de reserva.")
             messages.append(
-                f"🚨 FALHA CRÍTICA DE MÍDIA: {pending} setores pendentes (C5), {reallocated} setores remapeados (05) "
-                f"e {uncorrectable} irrecuperáveis (C6). A superfície magnética está degradando rapidamente."
+                f"🚨 FALHA CRÍTICA DE MÍDIA: {pend_val} setores pendentes (C5), {realloc_val} setores remapeados (05) "
+                f"e {uncorr_val} irrecuperáveis (C6). A superfície magnética está degradando rapidamente."
             )
             recommendation = (
                 "RISCO IMINENTE: Crie imediatamente uma Imagem Forense (.img) via Clonagem Resiliente. "
@@ -221,18 +227,18 @@ def analyze_smart_data(
             risk = SmartRiskLevel.YELLOW
             hipoteses.append("Presença de setores instáveis sendo monitorados ou remapeados pelo firmware.")
             messages.append(
-                f"⚠️ ATENÇÃO: Detectados {pending} setores pendentes e {reallocated} setores remapeados. "
+                f"⚠️ ATENÇÃO: Detectados {pend_val} setores pendentes e {realloc_val} setores remapeados. "
                 "Existem bad sectors sendo monitorados pelo firmware."
             )
             recommendation = "Faça backup dos arquivos prioritários ou gere uma imagem clone antes de reparos."
 
     # Regra 3: Fadiga Mecânica no Motor
-    if spin_retry > 0:
+    if spin_val > 0:
         risk = SmartRiskLevel.RED
-        evidencias.append(f"Tentativas de rotação do motor (ID 10): {spin_retry} eventos registrados.")
+        evidencias.append(f"Tentativas de rotação do motor (ID 10): {spin_val} eventos registrados.")
         hipoteses.append("Fadiga mecânica no rolamento do motor de rotação ou fornecimento elétrico instável.")
         messages.append(
-            f"⚙️ FADIGA MECÂNICA: {spin_retry} falhas de inicialização do motor (ID 10/0A). "
+            f"⚙️ FADIGA MECÂNICA: {spin_val} falhas de inicialização do motor (ID 10/0A). "
             "O motor de rotação ou o rolamento está tendo dificuldade para atingir a rotação nominal."
         )
         recommendation = "Evite desligar e ligar o disco frequentemente. Faça cópia de emergência ininterrupta."

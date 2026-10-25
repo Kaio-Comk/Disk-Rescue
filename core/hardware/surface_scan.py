@@ -18,7 +18,7 @@ class SurfaceBlockResult:
     lba: int
     count_sectors: int
     latency_ms: float
-    status: str  # "fast", "good", "slow", "very_slow", "bad"
+    status: str  # "fast", "good", "slow", "very_slow", "critical_delay", "bad"
 
 
 @dataclass
@@ -28,7 +28,8 @@ class SurfaceScanSummary:
     good_count: int = 0         # 20ms .. 100ms
     slow_count: int = 0         # 100ms .. 250ms
     very_slow_count: int = 0    # 250ms .. 1000ms
-    bad_count: int = 0          # > 1000ms ou OSError
+    critical_delay_count: int = 0 # >= 1000ms (lido com atraso severo)
+    bad_count: int = 0          # Erro irrecuperável de I/O ou truncamento (bad sector confirmado)
 
 
 def scan_surface_latency(
@@ -82,7 +83,7 @@ def scan_surface_latency(
                     elif latency < 1000.0:
                         status = "very_slow"
                     else:
-                        status = "bad"
+                        status = "critical_delay"
                 except Exception:
                     latency = 3000.0
                     status = "bad"
@@ -96,6 +97,8 @@ def scan_surface_latency(
                     summary.slow_count += 1
                 elif status == "very_slow":
                     summary.very_slow_count += 1
+                elif status == "critical_delay":
+                    summary.critical_delay_count += 1
                 elif status == "bad":
                     summary.bad_count += 1
 

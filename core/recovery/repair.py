@@ -42,15 +42,16 @@ def repair_gpt_partition_offset(
 ) -> RepairResult:
     """Corrige o offset de início e fim de uma partição na tabela GPT com backup prévio de segurança."""
     backup_dir = backup_dir or Path("backups")
-    backup_dir.mkdir(parents=True, exist_ok=True)
 
-    # Proteção P0: Não gravar backup de segurança no próprio disco de origem
+    # Proteção P0: Validar segurança antes de criar qualquer diretório ou arquivo
     try:
         from core.hardware.device_resolver import assert_safe_source_and_destination
         assert_safe_source_and_destination(device_path, backup_dir, is_directory=True)
     except Exception as exc:
         log.error("Bloqueio de segurança no diretório de backup: %s", exc)
         return RepairResult(success=False, message=f"Diretório de backup inseguro: {exc}")
+
+    backup_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     clean_name = device_path.replace("\\", "_").replace("/", "_").replace(":", "").replace(".", "").strip("_")[-30:]
@@ -132,14 +133,27 @@ def repair_gpt_partition_offset(
             f.flush()
             try:
                 os.fsync(f.fileno())
-            except OSError:
-                pass
+            except OSError as err:
+                log.error("Falha ao forçar sincronização física (fsync): %s", err)
+                raise OSError(f"Falha de sincronização física: {err}") from err
 
-            # Verificação pós-escrita imediata
+            # Verificação pós-escrita imediata no cabeçalho primário
             f.seek(1 * sector_size)
             read_hdr = f.read(len(new_header_bytes))
             if read_hdr != new_header_bytes:
                 raise OSError("Verificação pós-escrita falhou no cabeçalho GPT primário.")
+
+            # Verificação pós-escrita imediata no cabeçalho e entradas de backup
+            if gpt.backup_lba > 0 and bkp_entries_lba > 0:
+                f.seek(bkp_entries_lba * sector_size)
+                read_bkp_entries = f.read(len(bkp_entries_bytes))
+                if read_bkp_entries != bkp_entries_bytes:
+                    raise OSError("Verificação pós-escrita falhou nas entradas GPT de backup.")
+
+                f.seek(gpt.backup_lba * sector_size)
+                read_bkp_hdr = f.read(len(bkp_header_bytes))
+                if read_bkp_hdr != bkp_header_bytes:
+                    raise OSError("Verificação pós-escrita falhou no cabeçalho GPT de backup.")
 
         log.info("Tabela GPT primária corrigida e gravada com sucesso.")
 
@@ -177,8 +191,34 @@ def create_raw_disk_image(
     cancel_check=None
 ) -> bool:
     """Cria uma imagem binária setor a setor da mídia física para análise forense segura."""
+    if sector_size <= 0:
+        raise ValueError("sector_size deve ser estritamente positivo.")
+    if chunk_sectors <= 0:
+        raise ValueError("chunk_sectors deve ser estritamente positivo.")
+    if max_sectors is not None and max_sectors <= 0:
+        raise ValueError("max_sectors deve ser estritamente positivo quando fornecido.")
+
     output_path = Path(output_path)
+
+    # 1. Proteção P0: Validar independência de disco físico ANTES de criar diretório ou abrir arquivo
+    try:
+        from core.hardware.device_resolver import assert_safe_source_and_destination
+        assert_safe_source_and_destination(device_path, output_path, is_directory=False)
+    except Exception as exc:
+        log.error("Bloqueio de segurança na criação de imagem forense: %s", exc)
+        raise ValueError(f"Origem e destino inseguros: {exc}") from exc
+
+    # Bloqueio caso a origem seja um arquivo e coincida com o destino
+    try:
+        if Path(device_path).resolve() == output_path.resolve():
+            raise ValueError("O arquivo de destino não pode coincidir com o arquivo de origem.")
+    except (ValueError, OSError) as err:
+        if "não pode coincidir" in str(err):
+            raise
+
+    # 2. Criação do diretório pai somente após validação segura
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
     chunk_bytes = chunk_sectors * sector_size
     current_sector = 0
     t_start = time.time()
@@ -203,6 +243,10 @@ def create_raw_disk_image(
 
                 buf = src.read(to_read)
                 if not buf:
+                    # Se max_sectors era esperado mas EOF ocorreu antes, a imagem ficou incompleta
+                    if max_sectors and current_sector < max_sectors:
+                        log.error("Fim prematuro da origem: lidos %d setores de %d esperados.", current_sector, max_sectors)
+                        return False
                     break
 
                 dst.write(buf)
@@ -215,6 +259,18 @@ def create_raw_disk_image(
                     speed = (bytes_transferred / (1024 * 1024)) / max(0.1, now - t_start)
                     progress_cb(current_sector, max_sectors or current_sector, speed)
                     last_cb_time = now
+
+            # Flush e fsync de durabilidade física
+            dst.flush()
+            try:
+                os.fsync(dst.fileno())
+            except OSError as err:
+                log.error("Falha ao sincronizar durabilidade da imagem (fsync): %s", err)
+                return False
+
+        if max_sectors and current_sector < max_sectors:
+            log.error("Cópia incompleta: apenas %d setores transferidos de %d.", current_sector, max_sectors)
+            return False
 
         if progress_cb:
             now = time.time()

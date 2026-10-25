@@ -649,10 +649,10 @@ class DiskRescueApp:
             "Cinza": "#94a3b8",
         }
         self.val_smart_risk.config(text=risk_name, fg=color_map.get(risk_name, "#ffffff"))
-        self.val_crc_err.config(text=str(report.crc_errors))
-        self.val_reallocated.config(text=str(report.reallocated_sectors))
-        self.val_pending.config(text=str(report.pending_sectors))
-        self.val_spin.config(text=str(report.spin_retries))
+        self.val_crc_err.config(text=str(report.crc_errors) if report.crc_errors is not None else "N/D")
+        self.val_reallocated.config(text=str(report.reallocated_sectors) if report.reallocated_sectors is not None else "N/D")
+        self.val_pending.config(text=str(report.pending_sectors) if report.pending_sectors is not None else "N/D")
+        self.val_spin.config(text=str(report.spin_retries) if report.spin_retries is not None else "N/D")
 
         lines = "\n\n".join(report.summary_messages)
         full_text = f"DIRETRIZ RECOMENDADA:\n{report.action_recommendation}\n\nDETALHES DO FIRMWARE:\n{lines}"
@@ -943,7 +943,8 @@ class DiskRescueApp:
             "good": "#3b82f6",
             "slow": "#eab308",
             "very_slow": "#f97316",
-            "bad": "#ef4444"
+            "critical_delay": "#dc2626",
+            "bad": "#7f1d1d"
         }
         color = colors.get(res.status, "#ef4444")
 

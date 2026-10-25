@@ -44,3 +44,37 @@ def test_surface_scan_validates_positive_parameters(tmp_path: Path):
     with pytest.raises(ValueError, match="start_lba deve ser maior ou igual a zero"):
         scan_surface_latency(str(disk_file), start_lba=-1)
 
+
+def test_surface_scan_distinguishes_critical_delay_from_bad(tmp_path: Path, monkeypatch):
+    """P2 Teste: Distingue leitura lenta (>1000ms com sucesso) de erro de leitura irrecuperável (bad)."""
+    import time
+    disk_file = tmp_path / "mock_delay.img"
+    disk_file.write_bytes(b"\x55" * (2048 * 512)) # 1 bloco de 1MB
+
+    # Simula latência alta (1.2s) na leitura sem erro de I/O
+    call_count = 0
+    orig_perf_counter = time.perf_counter
+
+    def mock_perf_counter():
+        nonlocal call_count
+        call_count += 1
+        # t0 retorna 0.0, t1 retorna 1.2s (1200ms)
+        return 1.2 if call_count % 2 == 0 else 0.0
+
+    monkeypatch.setattr(time, "perf_counter", mock_perf_counter)
+
+    results = []
+    summary = scan_surface_latency(
+        str(disk_file),
+        start_lba=0,
+        max_sectors=2048,
+        block_sectors=2048,
+        progress_cb=lambda r, s: results.append(r)
+    )
+
+    assert summary.total_tested_blocks == 1
+    assert summary.critical_delay_count == 1
+    assert summary.bad_count == 0
+    assert results[0].status == "critical_delay"
+
+

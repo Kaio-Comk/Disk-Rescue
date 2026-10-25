@@ -102,3 +102,19 @@ def test_repair_mbr_rejects_invalid_index_and_overlapping(tmp_path: Path):
     assert repair_mbr_partition(str(mbr_file), target_index=1, new_start_lba=0, new_sector_count=1000, backup_dir=backup_dir) is False
     assert repair_mbr_partition(str(mbr_file), target_index=1, new_start_lba=1000, new_sector_count=0, backup_dir=backup_dir) is False
 
+
+def test_repair_mbr_validates_backup_dir_before_mkdir(tmp_path: Path, monkeypatch):
+    """P0 Teste: Garante que diretório de backup inseguro seja rejeitado antes de mkdir."""
+    mbr_file = tmp_path / "mock_mbr.bin"
+    mbr_file.write_bytes(b"\x00" * 512)
+    unsafe_dir = tmp_path / "uncreated_unsafe_dir"
+
+    def mock_assert_safe(source_str, target_path, is_directory=False):
+        raise ValueError("Diretório de backup no mesmo disco.")
+
+    monkeypatch.setattr("core.hardware.device_resolver.assert_safe_source_and_destination", mock_assert_safe)
+
+    ok = repair_mbr_partition(str(mbr_file), target_index=1, new_start_lba=2048, new_sector_count=1000, backup_dir=unsafe_dir)
+    assert ok is False
+    assert not unsafe_dir.exists()
+

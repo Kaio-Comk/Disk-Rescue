@@ -1,7 +1,7 @@
 # 🛠️ DiskRescue
 
 [![Release](https://img.shields.io/github/v/release/Kaio-Comk/Disk-Rescue?color=blue&label=Vers%C3%A3o)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)
-[![Tests](https://img.shields.io/badge/Testes-50%2F50%20Aprovados-success)](https://github.com/Kaio-Comk/Disk-Rescue)
+[![Tests](https://img.shields.io/badge/Testes-60%2F60%20Aprovados-success)](https://github.com/Kaio-Comk/Disk-Rescue)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-blue?logo=python)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Plataforma-Windows%2011%20Fluent-0078d4?logo=windows)](https://github.com/Kaio-Comk/Disk-Rescue)
 [![License](https://img.shields.io/badge/Licen%C3%A7a-MIT-green)](LICENSE)
@@ -17,12 +17,12 @@ A aplicação conta com uma interface desktop moderna no padrão **Windows 11 Fl
 ## ⚡ Download Imediato do Executável
 
 Baixe a versão mais recente pronta para uso:
-👉 **[Baixar DiskRescue v0.2.3 (Executável Portátil)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)**
+👉 **[Baixar DiskRescue v0.2.4 (Executável Portátil)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)**
 
 * **Portátil e Autônomo:** Não requer instalação de Python nem dependências externas (~11.6 MB).
 * **Integridade Criptográfica (SHA-256):**
   ```text
-  2863FCBF13410F82BA8D7682D03B518AD455425E19E74598CF987A6B8F02E4E3
+  0761211DC2D3CA6EA9D043B5CBADA176A41BDDB3F94A959BF2CC997F18D3B75C
   ```
 * **Elevação UAC Automática:** Manifest embutido solicita privilégios de Administrador ao iniciar, garantindo acesso direto de baixo nível (`\\.\PhysicalDriveX`).
 
@@ -180,63 +180,73 @@ O DiskRescue foi concebido com foco absoluto na integridade física e preservaç
 
 ## 🧪 Cobertura de Testes Automatizados
 
-O sistema conta com suíte completa de 50 testes unitários automatizados com discos sintéticos em memória, streams bloqueadores e arquivos temporários:
+O sistema conta com suíte completa de 60 testes unitários automatizados com discos sintéticos em memória, streams bloqueadores e arquivos temporários:
 
 ```bash
 $ pytest tests/ -v
 ============================= test session starts =============================
-tests/test_carver.py::test_carver_detects_and_extracts_files PASSED      [  2%]
-tests/test_carver.py::test_carver_cross_block_large_file_over_1mb PASSED [  4%]
-tests/test_carver.py::test_carver_file_crossing_boundary_over_4kb PASSED [  6%]
-tests/test_carver.py::test_carver_handles_false_signatures_and_truncated_files PASSED [  8%]
-tests/test_carver.py::test_carver_extracts_png_with_ihdr_and_iend PASSED [ 10%]
-tests/test_carver.py::test_carver_rejects_negative_or_zero_chunk_sectors PASSED [ 12%]
-tests/test_carver.py::test_carver_does_not_overwrite_existing_recovered_files PASSED [ 14%]
-tests/test_carver.py::test_carver_rejects_anonymous_unidentified_stream PASSED [ 16%]
-tests/test_carver.py::test_carver_detects_header_split_across_block_boundary PASSED [ 18%]
-tests/test_fat_exfat.py::test_parse_fat32_and_exfat PASSED               [ 20%]
-tests/test_fat_exfat.py::test_scan_boot_sectors_discovers_fat32_and_exfat PASSED [ 22%]
-tests/test_gpt_repair.py::test_parse_gpt_valida_crc PASSED               [ 24%]
-tests/test_gpt_repair.py::test_rebuild_gpt_corrige_offset_e_recalcula_crc PASSED [ 26%]
-tests/test_gpt_repair.py::test_gpt_parser_rejects_malformed_structures PASSED [ 28%]
-tests/test_gpt_repair.py::test_repair_gpt_partition_offset_syncs_backup_and_rejects_overlaps PASSED [ 30%]
-tests/test_mbr.py::test_parse_and_rebuild_mbr PASSED                     [ 32%]
-tests/test_mbr.py::test_repair_mbr_partition_in_file PASSED              [ 34%]
-tests/test_mbr.py::test_repair_mbr_rejects_invalid_index_and_overlapping PASSED [ 36%]
-tests/test_ntfs_boot_repair.py::test_diagnose_and_restore_ntfs_boot_sector PASSED [ 38%]
-tests/test_resilient_clone.py::test_resilient_clone_clean_disk PASSED    [ 40%]
-tests/test_resilient_clone.py::test_resilient_clone_synthetic_lba_exact_verification PASSED [ 42%]
-tests/test_resilient_clone.py::test_resilient_clone_resume_from_interrupted_map PASSED [ 44%]
-tests/test_resilient_clone.py::test_clone_map_rejects_mismatched_device PASSED [ 46%]
-tests/test_resilient_clone.py::test_clone_parameters_strictly_positive PASSED [ 48%]
-tests/test_resilient_clone.py::test_clone_map_rejects_corrupted_or_gapped_intervals PASSED [ 50%]
-tests/test_resilient_clone.py::test_cloner_rejects_map_path_identical_to_output_image PASSED [ 52%]
-tests/test_resilient_clone.py::test_cloner_rejects_map_path_on_same_physical_disk_as_source PASSED [ 54%]
-tests/test_resilient_clone.py::test_cloner_rejects_map_temporary_collision_with_output_image PASSED [ 56%]
-tests/test_resilient_clone.py::test_clone_map_rejects_mismatched_sector_size PASSED [ 58%]
-tests/test_resilient_clone.py::test_clone_map_rejects_oversized_image PASSED [ 60%]
-tests/test_safety_write_blocker.py::test_strict_read_only_stream_throws_on_any_write PASSED [ 62%]
-tests/test_safety_write_blocker.py::test_instrumented_stream_with_carver_and_parsers PASSED [ 64%]
-tests/test_safety_write_blocker.py::test_cloner_source_never_receives_writes PASSED [ 66%]
-tests/test_safety_write_blocker.py::test_physical_drive_conflict_detection_blocks_same_disk PASSED [ 68%]
-tests/test_safety_write_blocker.py::test_cloner_blocks_exact_same_file PASSED [ 70%]
-tests/test_safety_write_blocker.py::test_carver_structural_integrity_verification PASSED [ 72%]
-tests/test_safety_write_blocker.py::test_physical_drive_conflict_fail_closed_when_unresolved PASSED [ 74%]
-tests/test_safety_write_blocker.py::test_physical_drive_conflict_fail_closed_when_destination_physical_and_source_unresolved PASSED [ 76%]
-tests/test_safety_write_blocker.py::test_volume_guid_conflict_detection PASSED [ 78%]
-tests/test_safety_write_blocker.py::test_physical_drive_number_not_fooled_by_filename PASSED [ 80%]
-tests/test_smart_diagnostics.py::test_smart_healthy PASSED               [ 82%]
-tests/test_smart_diagnostics.py::test_smart_sata_cable_fault_detected PASSED [ 84%]
+tests/test_carver.py::test_carver_detects_and_extracts_files PASSED      [  1%]
+tests/test_carver.py::test_carver_cross_block_large_file_over_1mb PASSED [  3%]
+tests/test_carver.py::test_carver_file_crossing_boundary_over_4kb PASSED [  5%]
+tests/test_carver.py::test_carver_handles_false_signatures_and_truncated_files PASSED [  6%]
+tests/test_carver.py::test_carver_extracts_png_with_ihdr_and_iend PASSED [  8%]
+tests/test_carver.py::test_carver_rejects_negative_or_zero_chunk_sectors PASSED [ 10%]
+tests/test_carver.py::test_carver_does_not_overwrite_existing_recovered_files PASSED [ 11%]
+tests/test_carver.py::test_carver_rejects_anonymous_unidentified_stream PASSED [ 13%]
+tests/test_carver.py::test_carver_detects_header_split_across_block_boundary PASSED [ 15%]
+tests/test_fat_exfat.py::test_parse_fat32_and_exfat PASSED               [ 16%]
+tests/test_fat_exfat.py::test_scan_boot_sectors_discovers_fat32_and_exfat PASSED [ 18%]
+tests/test_gpt_repair.py::test_parse_gpt_valida_crc PASSED               [ 20%]
+tests/test_gpt_repair.py::test_rebuild_gpt_corrige_offset_e_recalcula_crc PASSED [ 21%]
+tests/test_gpt_repair.py::test_gpt_parser_rejects_malformed_structures PASSED [ 23%]
+tests/test_gpt_repair.py::test_repair_gpt_partition_offset_syncs_backup_and_rejects_overlaps PASSED [ 25%]
+tests/test_gpt_repair.py::test_repair_gpt_validates_backup_dir_before_mkdir PASSED [ 26%]
+tests/test_mbr.py::test_parse_and_rebuild_mbr PASSED                     [ 28%]
+tests/test_mbr.py::test_repair_mbr_partition_in_file PASSED              [ 30%]
+tests/test_mbr.py::test_repair_mbr_rejects_invalid_index_and_overlapping PASSED [ 31%]
+tests/test_mbr.py::test_repair_mbr_validates_backup_dir_before_mkdir PASSED [ 33%]
+tests/test_ntfs_boot_repair.py::test_diagnose_and_restore_ntfs_boot_sector PASSED [ 35%]
+tests/test_ntfs_boot_repair.py::test_restore_ntfs_validates_backup_dir_before_mkdir PASSED [ 36%]
+tests/test_raw_image.py::test_create_raw_disk_image_validates_positive_parameters PASSED [ 38%]
+tests/test_raw_image.py::test_create_raw_disk_image_blocks_identical_source_and_destination PASSED [ 40%]
+tests/test_raw_image.py::test_create_raw_disk_image_blocks_same_physical_drive PASSED [ 41%]
+tests/test_raw_image.py::test_create_raw_disk_image_detects_incomplete_read PASSED [ 43%]
+tests/test_raw_image.py::test_create_raw_disk_image_success_with_progress_and_cancel PASSED [ 45%]
+tests/test_resilient_clone.py::test_resilient_clone_clean_disk PASSED    [ 46%]
+tests/test_resilient_clone.py::test_resilient_clone_synthetic_lba_exact_verification PASSED [ 48%]
+tests/test_resilient_clone.py::test_resilient_clone_resume_from_interrupted_map PASSED [ 50%]
+tests/test_clone_map_rejects_mismatched_device PASSED                    [ 51%]
+tests/test_resilient_clone.py::test_clone_parameters_strictly_positive PASSED [ 53%]
+tests/test_resilient_clone.py::test_clone_map_rejects_corrupted_or_gapped_intervals PASSED [ 55%]
+tests/test_resilient_clone.py::test_cloner_rejects_map_path_identical_to_output_image PASSED [ 56%]
+tests/test_resilient_clone.py::test_cloner_rejects_map_path_on_same_physical_disk_as_source PASSED [ 58%]
+tests/test_resilient_clone.py::test_cloner_rejects_map_temporary_collision_with_output_image PASSED [ 60%]
+tests/test_resilient_clone.py::test_clone_map_rejects_mismatched_sector_size PASSED [ 61%]
+tests/test_resilient_clone.py::test_clone_map_rejects_oversized_image PASSED [ 63%]
+tests/test_resilient_clone.py::test_cloner_fsync_failure_raises_persistence_error PASSED [ 65%]
+tests/test_safety_write_blocker.py::test_strict_read_only_stream_throws_on_any_write PASSED [ 66%]
+tests/test_safety_write_blocker.py::test_instrumented_stream_with_carver_and_parsers PASSED [ 68%]
+tests/test_safety_write_blocker.py::test_cloner_source_never_receives_writes PASSED [ 70%]
+tests/test_safety_write_blocker.py::test_physical_drive_conflict_detection_blocks_same_disk PASSED [ 71%]
+tests/test_safety_write_blocker.py::test_cloner_blocks_exact_same_file PASSED [ 73%]
+tests/test_safety_write_blocker.py::test_carver_structural_integrity_verification PASSED [ 75%]
+tests/test_safety_write_blocker.py::test_physical_drive_conflict_fail_closed_when_unresolved PASSED [ 76%]
+tests/test_safety_write_blocker.py::test_physical_drive_conflict_fail_closed_when_destination_physical_and_source_unresolved PASSED [ 78%]
+tests/test_volume_guid_conflict_detection PASSED                          [ 80%]
+tests/test_safety_write_blocker.py::test_physical_drive_number_not_fooled_by_filename PASSED [ 81%]
+tests/test_smart_diagnostics.py::test_smart_healthy PASSED               [ 83%]
+tests/test_smart_diagnostics.py::test_smart_sata_cable_fault_detected PASSED [ 85%]
 tests/test_smart_diagnostics.py::test_smart_surface_critical_degradation PASSED [ 86%]
 tests/test_smart_diagnostics.py::test_smart_mechanical_spin_retry PASSED [ 88%]
 tests/test_smart_diagnostics.py::test_smart_no_telemetry_returns_unknown PASSED [ 90%]
-tests/test_smart_diagnostics.py::test_smart_read_errors_not_confused_with_pending_sectors PASSED [ 92%]
-tests/test_smart_diagnostics.py::test_smart_windows_reliability_counters_remain_segregated_and_unknown PASSED [ 94%]
-tests/test_smart_diagnostics.py::test_smart_unknown_when_only_uninformative_attributes_present PASSED [ 96%]
-tests/test_surface_scan.py::test_surface_scan_measures_blocks PASSED     [ 98%]
-tests/test_surface_scan.py::test_surface_scan_validates_positive_parameters PASSED [100%]
+tests/test_smart_diagnostics.py::test_smart_read_errors_not_confused_with_pending_sectors PASSED [ 91%]
+tests/test_smart_diagnostics.py::test_smart_windows_reliability_counters_remain_segregated_and_unknown PASSED [ 93%]
+tests/test_smart_diagnostics.py::test_smart_unknown_when_only_uninformative_attributes_present PASSED [ 95%]
+tests/test_surface_scan.py::test_surface_scan_measures_blocks PASSED     [ 96%]
+tests/test_surface_scan.py::test_surface_scan_validates_positive_parameters PASSED [ 98%]
+tests/test_surface_scan.py::test_surface_scan_distinguishes_critical_delay_from_bad PASSED [100%]
 
-============================= 50 passed in 5.18s ==============================
+============================= 60 passed in 4.68s ==============================
 ```
 
 ---

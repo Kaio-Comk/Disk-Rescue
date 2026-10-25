@@ -158,15 +158,16 @@ def repair_mbr_partition(
         return False
 
     backup_dir = backup_dir or Path("backups")
-    backup_dir.mkdir(parents=True, exist_ok=True)
 
-    # Proteção P0: Não gravar backup de segurança no próprio disco de origem
+    # Proteção P0: Validar segurança antes de criar qualquer diretório ou arquivo
     try:
         from core.hardware.device_resolver import assert_safe_source_and_destination
         assert_safe_source_and_destination(device_path, backup_dir, is_directory=True)
     except Exception as exc:
         log.error("Bloqueio de segurança no diretório de backup: %s", exc)
         return False
+
+    backup_dir.mkdir(parents=True, exist_ok=True)
 
     clean_name = device_path.replace("\\", "_").replace("/", "_").replace(":", "").replace(".", "").strip("_")
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -221,8 +222,9 @@ def repair_mbr_partition(
             f.flush()
             try:
                 os.fsync(f.fileno())
-            except OSError:
-                pass
+            except OSError as err:
+                log.error("Falha ao sincronizar gravação de LBA 0 (fsync): %s", err)
+                raise OSError(f"Falha de sincronização física: {err}") from err
 
             # Verificação pós-escrita imediata
             f.seek(0)

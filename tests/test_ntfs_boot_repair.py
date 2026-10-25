@@ -75,3 +75,19 @@ def test_diagnose_and_restore_ntfs_boot_sector(tmp_path: Path):
     diag_after = diagnose_ntfs_boot_sectors(str(disk_img), start_lba, vol_sectors, sector_size)
     assert diag_after.primary_valid is True
     assert diag_after.can_repair is False
+
+
+def test_restore_ntfs_validates_backup_dir_before_mkdir(tmp_path: Path, monkeypatch):
+    """P0 Teste: Garante que diretório de backup inseguro seja rejeitado antes de mkdir."""
+    disk_img = tmp_path / "mock_disk.img"
+    disk_img.write_bytes(b"\x00" * 4096)
+    unsafe_dir = tmp_path / "uncreated_unsafe_ntfs_dir"
+
+    def mock_assert_safe(source_str, target_path, is_directory=False):
+        raise ValueError("Diretório de backup inseguro no mesmo disco.")
+
+    monkeypatch.setattr("core.hardware.device_resolver.assert_safe_source_and_destination", mock_assert_safe)
+
+    res = restore_ntfs_boot_from_backup(str(disk_img), partition_start_lba=2048, partition_total_sectors=1000, backup_dir=unsafe_dir)
+    assert res.success is False
+    assert not unsafe_dir.exists()

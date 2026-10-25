@@ -79,6 +79,11 @@ def test_smart_no_telemetry_returns_unknown():
         temperature_c=None
     )
     assert report.risk_level == SmartRiskLevel.UNKNOWN
+    assert report.reallocated_sectors is None
+    assert report.pending_sectors is None
+    assert report.uncorrectable_sectors is None
+    assert report.crc_errors is None
+    assert report.spin_retries is None
     assert any("não disponível" in m.lower() or "insuficiente" in m.lower() for m in report.summary_messages)
 
 

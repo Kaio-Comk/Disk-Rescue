@@ -201,3 +201,24 @@ def test_repair_gpt_partition_offset_syncs_backup_and_rejects_overlaps(tmp_path)
     # Verifica que flags originais foram preservadas
     assert reopened.partitions[1].flags == 0x0
 
+
+def test_repair_gpt_validates_backup_dir_before_mkdir(tmp_path, monkeypatch):
+    """P0 Teste: Garante que diretório de backup inseguro seja rejeitado antes de mkdir."""
+    from core.filesystem.scanner import DiscoveredFilesystem
+    from core.recovery.repair import repair_gpt_partition_offset
+
+    img = tmp_path / "mock_disk.bin"
+    img.write_bytes(_criar_gpt_sintetico())
+    unsafe_dir = tmp_path / "uncreated_unsafe_gpt_dir"
+
+    def mock_assert_safe(source_str, target_path, is_directory=False):
+        raise ValueError("Diretório de backup inseguro no mesmo disco.")
+
+    monkeypatch.setattr("core.hardware.device_resolver.assert_safe_source_and_destination", mock_assert_safe)
+
+    fs = DiscoveredFilesystem("NTFS", start_lba=40000, total_sectors=1000, size_bytes=1000 * 512)
+    res = repair_gpt_partition_offset(str(img), target_partition_index=2, discovered_fs=fs, backup_dir=unsafe_dir)
+    assert res.success is False
+    assert not unsafe_dir.exists()
+
+

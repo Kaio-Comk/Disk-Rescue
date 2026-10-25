@@ -382,3 +382,26 @@ def test_clone_map_rejects_oversized_image(tmp_path: Path):
     )
     assert loaded is None
 
+
+def test_cloner_fsync_failure_raises_persistence_error(tmp_path: Path, monkeypatch):
+    """P1 Teste: Garante que falha física de fsync não seja ignorada silenciosamente."""
+    import os
+    img_file = tmp_path / "fsync_test.img"
+    map_file = tmp_path / "fsync_test.map"
+
+    cloner = ResilientCloner(
+        device_path="mock://fsync_dev",
+        output_image_path=img_file,
+        total_sectors=10,
+        map_path=map_file
+    )
+
+    def mock_fsync_fail(fd):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(os, "fsync", mock_fsync_fail)
+
+    with pytest.raises(OSError, match="Falha de sincronização na imagem de destino|Falha de persistência física"):
+        cloner.run(reader_fn=lambda lba, count: b"\x00" * (count * 512))
+
+

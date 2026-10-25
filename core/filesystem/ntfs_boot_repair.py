@@ -119,15 +119,16 @@ def restore_ntfs_boot_from_backup(
         )
 
     backup_dir = backup_dir or Path("backups")
-    backup_dir.mkdir(parents=True, exist_ok=True)
 
-    # Proteção P0: Não gravar backup de segurança no próprio disco sob reparo
+    # Proteção P0: Validar segurança antes de criar qualquer diretório ou arquivo
     try:
         from core.hardware.device_resolver import assert_safe_source_and_destination
         assert_safe_source_and_destination(device_path, backup_dir, is_directory=True)
     except Exception as exc:
         log.error("Bloqueio de segurança no diretório de backup: %s", exc)
         return BootRepairResult(success=False, message=f"Diretório de backup inseguro: {exc}")
+
+    backup_dir.mkdir(parents=True, exist_ok=True)
 
     clean_name = device_path.replace("\\", "_").replace(".", "").replace("/", "_").strip("_")
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -155,8 +156,9 @@ def restore_ntfs_boot_from_backup(
             f.flush()
             try:
                 os.fsync(f.fileno())
-            except OSError:
-                pass
+            except OSError as err:
+                log.error("Falha ao sincronizar Boot Sector NTFS gravado (fsync): %s", err)
+                raise OSError(f"Falha de sincronização física: {err}") from err
 
             # Verificação pós-escrita imediata
             f.seek(diag.primary_lba * sector_size)

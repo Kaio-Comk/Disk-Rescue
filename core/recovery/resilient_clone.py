@@ -120,9 +120,11 @@ class CloneMap:
             f.write(json.dumps(data, indent=2))
             f.flush()
             try:
-                os.fsync(f.fileno())
+                if hasattr(f, "fileno"):
+                    os.fsync(f.fileno())
             except OSError as err:
-                log.warning("fsync não pôde ser completado no arquivo temporário de mapa: %s", err)
+                log.error("Falha ao sincronizar mapa no disco (fsync): %s", err)
+                raise OSError(f"Falha de persistência física no mapa: {err}") from err
         os.replace(tmp_path, map_path)
 
     @classmethod
@@ -368,9 +370,11 @@ class ResilientCloner:
                 dst.truncate(target_size)
                 dst.flush()
                 try:
-                    os.fsync(dst.fileno())
+                    if hasattr(dst, "fileno"):
+                        os.fsync(dst.fileno())
                 except OSError as err:
-                    log.debug("Aviso de durabilidade: fsync na imagem: %s", err)
+                    log.error("Falha ao sincronizar pré-alocação da imagem (fsync): %s", err)
+                    raise OSError(f"Falha de sincronização na imagem de destino: {err}") from err
 
         # Leitor customizado ou leitura nativa direta do dispositivo (abertura estrita somente leitura)
         def default_reader(lba: int, count: int) -> bytes:
@@ -420,9 +424,11 @@ class ResilientCloner:
                     if now - last_save_time >= 2.0:
                         dst_file.flush()
                         try:
-                            os.fsync(dst_file.fileno())
+                            if hasattr(dst_file, "fileno"):
+                                os.fsync(dst_file.fileno())
                         except OSError as err:
-                            log.debug("Aviso de durabilidade: fsync na imagem: %s", err)
+                            log.error("Falha de persistência física na imagem (fsync): %s", err)
+                            raise OSError(f"Falha de sincronização na imagem de destino: {err}") from err
                         self.clone_map.save_map(self.map_path)
                         last_save_time = now
 
@@ -441,9 +447,11 @@ class ResilientCloner:
 
             dst_file.flush()
             try:
-                os.fsync(dst_file.fileno())
+                if hasattr(dst_file, "fileno"):
+                    os.fsync(dst_file.fileno())
             except OSError as err:
-                log.debug("Aviso de durabilidade: fsync na imagem: %s", err)
+                log.error("Falha de persistência física na imagem (fsync): %s", err)
+                raise OSError(f"Falha de sincronização na imagem de destino: {err}") from err
             self.clone_map.save_map(self.map_path)
 
             # ── FASE 2: RASPAGEM CIRÚRGICA DE TODOS OS SETORES PULADOS ───────────
@@ -477,9 +485,11 @@ class ResilientCloner:
                         if now - last_save_time >= 2.0:
                             dst_file.flush()
                             try:
-                                os.fsync(dst_file.fileno())
+                                if hasattr(dst_file, "fileno"):
+                                    os.fsync(dst_file.fileno())
                             except OSError as err:
-                                log.debug("Aviso de durabilidade: fsync na imagem: %s", err)
+                                log.error("Falha de persistência física na imagem (fsync): %s", err)
+                                raise OSError(f"Falha de sincronização na imagem de destino: {err}") from err
                             self.clone_map.save_map(self.map_path)
                             last_save_time = now
 
@@ -498,9 +508,11 @@ class ResilientCloner:
 
             dst_file.flush()
             try:
-                os.fsync(dst_file.fileno())
+                if hasattr(dst_file, "fileno"):
+                    os.fsync(dst_file.fileno())
             except OSError as err:
-                log.debug("Aviso de durabilidade: fsync na imagem: %s", err)
+                log.error("Falha de persistência física na imagem (fsync): %s", err)
+                raise OSError(f"Falha de sincronização na imagem de destino: {err}") from err
 
         self.clone_map.save_map(self.map_path)
         self.clone_map.recalculate_counts()
