@@ -1,113 +1,162 @@
 """
 tests/test_safety_write_blocker.py — Testes formais de segurança "Do No Harm" e Write-Blocker.
 Garante de forma verificável que:
-1. Nenhuma operação de diagnóstico, varredura ou carving escreve na mídia de origem.
-2. Origem e destino nunca podem ser o mesmo dispositivo.
-3. Arquivos extraídos por File Carving passam por verificação estrutural.
+1. Uma camada de I/O instrumentada (StrictReadOnlyDeviceStream) intercepta qualquer escrita com WriteBlockViolationError.
+2. Todas as ferramentas de diagnóstico, varredura de partição, carving e leitura de clonagem nunca escrevem na origem.
+3. Origem e destino nunca podem compartilhar o mesmo disco físico (ex: PhysicalDrive0 e volume na mesma unidade).
+4. Arquivos extraídos por File Carving passam por verificação estrutural e isolamento.
 """
 import io
+import struct
 from pathlib import Path
 import pytest
 
 from core.filesystem.ntfs_boot_repair import diagnose_ntfs_boot_sectors
 from core.filesystem.scanner import scan_boot_sectors
+from core.hardware.device_resolver import (
+    assert_safe_source_and_destination,
+    get_physical_drive_number,
+    is_same_physical_device,
+)
 from core.hardware.surface_scan import scan_surface_latency
+from core.hardware.write_blocker import StrictReadOnlyDeviceStream, WriteBlockViolationError
+from core.partition.gpt import parse_gpt
+from core.partition.mbr import parse_mbr
 from core.recovery.carver import FileCarver
 from core.recovery.resilient_clone import ResilientCloner
 
 
-class WriteBlockViolationError(Exception):
-    """Lançada quando qualquer tentativa de escrita é detectada no dispositivo de origem."""
-    pass
+def test_strict_read_only_stream_throws_on_any_write():
+    """Garante que o stream instrumentado intercepta e bloqueia qualquer operação de escrita."""
+    stream = StrictReadOnlyDeviceStream(b"TEST_SECTOR_DATA" * 32)
+
+    # Leitura permitida
+    data = stream.read(16)
+    assert len(data) == 16
+    assert stream.read_count == 1
+    assert stream.write_attempts == 0
+
+    # Escrita proibida
+    with pytest.raises(WriteBlockViolationError, match="Tentativa de escrita"):
+        stream.write(b"HACK")
+    assert stream.write_attempts == 1
+
+    # Writelines proibido
+    with pytest.raises(WriteBlockViolationError, match="writelines"):
+        stream.writelines([b"HACK"])
+    assert stream.write_attempts == 2
+
+    # Truncate proibido
+    with pytest.raises(WriteBlockViolationError, match="truncamento"):
+        stream.truncate(0)
+    assert stream.write_attempts == 3
 
 
-class ReadOnlyDeviceStream(io.BytesIO):
-    """Dispositivo simulado de leitura que bloqueia estritamente qualquer chamada de escrita."""
-
-    def __init__(self, initial_bytes: bytes):
-        super().__init__(initial_bytes)
-        self.write_attempts = 0
-        self.read_count = 0
-
-    def write(self, b):
-        self.write_attempts += 1
-        raise WriteBlockViolationError("BLOQUEIO DE SEGURANÇA: Tentativa de escrita em dispositivo de leitura!")
-
-    def read(self, size=-1):
-        self.read_count += 1
-        return super().read(size)
-
-
-def test_diagnostic_and_carver_scans_never_write_to_source(tmp_path: Path):
-    """Garante que ferramentas de triagem e extração operam como Write-Blocker estrito."""
-    # Cria disco sintético com Boot Sector NTFS
+def test_instrumented_stream_with_carver_and_parsers(tmp_path: Path):
+    """
+    Injeta a camada de I/O simulada StrictReadOnlyDeviceStream diretamente no carver e parsers.
+    Comprova que executam seus fluxos completos sem realizar uma única tentativa de escrita.
+    """
+    total_sectors = 200
     sector_size = 512
+    raw_buffer = bytearray(total_sectors * sector_size)
+
+    # 1. Injeta MBR sintética no LBA 0
+    raw_buffer[510:512] = b"\x55\xaa"
+
+    # 2. Injeta assinatura JPEG no LBA 20
+    jpeg_payload = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00" + (b"DATA" * 10) + b"\xff\xd9"
+    raw_buffer[20 * sector_size : 20 * sector_size + len(jpeg_payload)] = jpeg_payload
+
+    # Envolve em stream estritamente somente-leitura instrumentado
+    read_stream = StrictReadOnlyDeviceStream(raw_buffer)
+
+    # Executa parser MBR
+    mbr_result = parse_mbr(read_stream)
+    assert mbr_result is not None
+    assert mbr_result.has_valid_signature is True
+    assert read_stream.write_attempts == 0
+
+    # Executa File Carver diretamente no stream instrumentado
+    out_dir = tmp_path / "carver_instrumented_out"
+    carver = FileCarver(read_stream, out_dir)
+    recovered = carver.scan(max_sectors=total_sectors, chunk_sectors=50)
+
+    assert len(recovered) == 1
+    assert recovered[0].file_type == "JPEG"
+    assert read_stream.write_attempts == 0
+    assert read_stream.read_count > 0
+
+
+def test_cloner_source_never_receives_writes(tmp_path: Path):
+    """
+    Comprova que durante todo o ciclo de clonagem (Fase 1 e Fase 2),
+    o leitor da mídia de origem é 100% isolado e nunca recebe chamadas de escrita.
+    """
     total_sectors = 100
-    disk_data = bytearray(total_sectors * sector_size)
+    one_sector = (b"SOURCE_SECTOR_" * 50)[:512]
+    src_data = one_sector * total_sectors
 
-    # Injeta assinatura NTFS e parâmetros mínimos de BPB
-    import struct
-    disk_data[3:11] = b"NTFS    "
-    struct.pack_into("<HB", disk_data, 11, 512, 8)
-    struct.pack_into("<Q", disk_data, 40, total_sectors)
-    disk_data[510:512] = b"\x55\xaa"
+    source_stream = StrictReadOnlyDeviceStream(src_data)
 
-    disk_file = tmp_path / "mock_readonly_disk.bin"
-    disk_file.write_bytes(disk_data)
+    def instrumented_reader(lba: int, count: int) -> bytes:
+        source_stream.seek(lba * 512)
+        return source_stream.read(count * 512)
 
-    initial_mtime = disk_file.stat().st_mtime_ns
+    dst_img = tmp_path / "destination_isolated.img"
+    cloner = ResilientCloner(
+        device_path="mock://isolated_source",
+        output_image_path=dst_img,
+        total_sectors=total_sectors,
+        block_sectors=16,
+        skip_step_sectors=32
+    )
 
-    # 1. Diagnóstico NTFS
-    diag = diagnose_ntfs_boot_sectors(str(disk_file), partition_start_lba=0, partition_total_sectors=total_sectors)
-    assert diag is not None
-
-    # 2. Varredura de Boot Sectors
-    discovered = scan_boot_sectors(str(disk_file), max_lba=total_sectors)
-    assert len(discovered) >= 1
-
-    # 3. Varredura de Superfície
-    summary = scan_surface_latency(str(disk_file), max_sectors=total_sectors, block_sectors=10)
-    assert summary.total_tested_blocks > 0
-
-    # 4. File Carving
-    carve_out = tmp_path / "carve_safe_out"
-    carver = FileCarver(str(disk_file), carve_out)
-    carved_files = carver.scan(max_sectors=total_sectors)
-
-    # Verificação estrita de não-modificação da mídia de origem
-    final_mtime = disk_file.stat().st_mtime_ns
-    assert disk_file.stat().st_size == total_sectors * sector_size
-    assert initial_mtime == final_mtime, "O arquivo de origem foi modificado durante operações de diagnóstico!"
+    res = cloner.run(reader_fn=instrumented_reader)
+    assert res.success is True
+    assert source_stream.write_attempts == 0
+    assert source_stream.bytes_read == total_sectors * 512
 
 
-def test_cloner_blocks_same_source_and_destination(tmp_path: Path):
-    """P0: Impedir categoricamente que a imagem de saída seja gravada sobre o próprio disco de origem."""
-    fake_disk = tmp_path / "failing_drive.raw"
-    fake_disk.write_bytes(b"\x00" * 4096)
+def test_physical_drive_conflict_detection_blocks_same_disk(monkeypatch, tmp_path: Path):
+    """
+    P0 Teste Crítico: Garante que a proteção bloqueia a gravação quando origem e destino
+    estiverem no mesmo disco físico (ex: PhysicalDrive0 e partição C: ou B: no mesmo drive).
+    """
+    # 1. Simula que \\.\PhysicalDrive0 e a unidade B: pertencem ao mesmo disco físico (número 0)
+    def mock_drive_resolver(path):
+        p = str(path).lower()
+        if "physicaldrive0" in p or "b:" in p:
+            return 0
+        if "physicaldrive1" in p or "c:" in p:
+            return 1
+        return None
 
-    # Tentativa de clonar o disco sobre ele mesmo
-    with pytest.raises(ValueError, match="Origem e destino não podem ser o mesmo dispositivo"):
-        ResilientCloner(
-            device_path=str(fake_disk),
-            output_image_path=fake_disk,
-            total_sectors=8
-        )
+    monkeypatch.setattr("core.hardware.device_resolver.get_physical_drive_number", mock_drive_resolver)
+
+    # Caso 1: Clonar PhysicalDrive0 para B:\imagem.img (MESMO DISCO FÍSICO -> BLOQUEADO!)
+    with pytest.raises(ValueError, match="mesmo disco físico \\(PhysicalDrive0\\)"):
+        assert_safe_source_and_destination(r"\\.\PhysicalDrive0", r"B:\Imagens\disco.img")
+
+    # Caso 2: Carving de PhysicalDrive0 para B:\Recuperados (MESMO DISCO FÍSICO -> BLOQUEADO!)
+    with pytest.raises(ValueError, match="mesmo disco físico \\(PhysicalDrive0\\)"):
+        assert_safe_source_and_destination(r"\\.\PhysicalDrive0", r"B:\Recuperados", is_directory=True)
+
+    # Caso 3: Clonar PhysicalDrive0 para C:\Imagens\disco.img (DISCOS FÍSICOS DIFERENTES: 0 e 1 -> PERMITIDO!)
+    assert_safe_source_and_destination(r"\\.\PhysicalDrive0", r"C:\Imagens\disco.img")
 
 
-def test_carver_blocks_output_dir_on_source(tmp_path: Path):
-    """P0: Impedir salvar arquivos extraídos no mesmo caminho do dispositivo."""
-    fake_disk = tmp_path / "failing_drive.raw"
-    fake_disk.write_bytes(b"\x00" * 4096)
+def test_cloner_blocks_exact_same_file(tmp_path: Path):
+    """P0 Teste: Impede categoricamente clonar um arquivo sobre si mesmo."""
+    img_file = tmp_path / "disk.raw"
+    img_file.write_bytes(b"\x00" * 4096)
 
-    with pytest.raises(ValueError, match="não pode ser o dispositivo de origem"):
-        FileCarver(
-            device_path=str(fake_disk),
-            output_dir=fake_disk
-        )
+    with pytest.raises(ValueError, match="Origem e destino são o mesmo dispositivo"):
+        assert_safe_source_and_destination(img_file, img_file)
 
 
 def test_carver_structural_integrity_verification(tmp_path: Path):
-    """P1: Validar verificação pós-extração de arquivos."""
+    """P1 Teste: Validação pós-extração de arquivos."""
     import zipfile
 
     out_dir = tmp_path / "carver_verify"

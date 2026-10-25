@@ -1,14 +1,14 @@
 # 🛠️ DiskRescue
 
 [![Release](https://img.shields.io/github/v/release/Kaio-Comk/Disk-Rescue?color=blue&label=Vers%C3%A3o)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)
-[![Tests](https://img.shields.io/badge/Testes-19%2F19%20Aprovados-success)](https://github.com/Kaio-Comk/Disk-Rescue)
+[![Tests](https://img.shields.io/badge/Testes-26%2F26%20Aprovados-success)](https://github.com/Kaio-Comk/Disk-Rescue)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-blue?logo=python)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Plataforma-Windows%2011%20Fluent-0078d4?logo=windows)](https://github.com/Kaio-Comk/Disk-Rescue)
 [![License](https://img.shields.io/badge/Licen%C3%A7a-MIT-green)](LICENSE)
 
 **Sistema Unificado e Autônomo para Diagnóstico Profundo, Clonagem Resiliente e Recuperação Forense de Discos.**
 
-O **DiskRescue** é uma suíte de engenharia reversa e recuperação de dados projetada para HDDs, SSDs, pendrives e mídias removíveis. Ele combina análise estrutural de baixo nível (parsers nativos de MBR, GPT, NTFS, FAT32 e exFAT), telemetria S.M.A.R.T. preditiva com isolamento de falhas de cabo SATA, motor de clonagem em duas fases (estilo GNU `ddrescue`), raspagem direta de arquivos (*File Carving*) com validação estrutural pós-extração e visualização gráfica de latência de superfície (*Heatmap*).
+O **DiskRescue** é uma suíte de engenharia reversa e recuperação de dados projetada para HDDs, SSDs, pendrives e mídias removíveis. Ele combina análise estrutural de baixo nível (parsers nativos de MBR, GPT, NTFS, FAT32 e exFAT), telemetria S.M.A.R.T. preditiva com isolamento de falhas de cabo SATA, motor de clonagem em duas fases (estilo GNU `ddrescue`) com contabilização integral de LBAs e mapa atômico de retomada, extração direta contínua de arquivos (*File Carving*) com validação estrutural pós-extração e suporte multi-bloco, além de visualização gráfica de latência de superfície (*Heatmap*).
 
 A aplicação conta com uma interface desktop moderna no padrão **Windows 11 Fluent Design** e é distribuída como binário portátil autônomo (`DiskRescue.exe`) com solicitação nativa de privilégios de administrador (UAC).
 
@@ -17,12 +17,12 @@ A aplicação conta com uma interface desktop moderna no padrão **Windows 11 Fl
 ## ⚡ Download Imediato do Executável
 
 Baixe a versão mais recente pronta para uso:
-👉 **[Baixar DiskRescue v0.2.0 (Executável Portátil)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)**
+👉 **[Baixar DiskRescue v0.2.1 (Executável Portátil)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)**
 
-* **Portátil e Autônomo:** Não requer instalação de Python nem dependências externas (~11.6 MB).
+* **Portátil e Autônomo:** Não requer instalação de Python nem dependências externas.
 * **Integridade Criptográfica (SHA-256):**
   ```text
-  9847DE22F57A62BE8057FFA722052B30683F71CB70AC56C91B42F720C96CAEBD
+  (Calculado a cada compilação de release)
   ```
 * **Elevação UAC Automática:** Manifest embutido solicita privilégios de Administrador ao iniciar, garantindo acesso direto de baixo nível (`\\.\PhysicalDriveX`).
 
@@ -50,7 +50,9 @@ flowchart TD
         
         subgraph Hardware ["Hardware & Telemetria (core.hardware)"]
             DevScanner["Device Scanner (PhysicalDrive / WMI)"]
-            SmartEngine["SMART & SATA Cable Diagnostic Engine"]
+            DevResolver["Device Resolver (IOCTL_STORAGE_GET_DEVICE_NUMBER)"]
+            WriteBlocker["Write-Blocker I/O Layer (StrictReadOnlyDeviceStream)"]
+            SmartEngine["SMART Probabilistic Engine & Report"]
             SurfaceScanner["Surface Latency Scanner & Heatmap"]
         end
         
@@ -66,20 +68,22 @@ flowchart TD
         
         subgraph Recovery ["Motores de Resgate (core.recovery)"]
             BackupManager["LBA Snapshot & Rollback Engine"]
-            ResilientCloner["Clonagem Resiliente 2-Fases (Modo ddrescue com .map)"]
-            FileCarver["File Carver Forense (JPG, PNG, PDF, ZIP)"]
+            ResilientCloner["Clonagem Resiliente 2-Fases (Modo ddrescue com .map atômico)"]
+            FileCarver["File Carver Forense Multi-bloco (JPG, PNG, PDF, ZIP)"]
         end
     end
 
     subgraph HardwareLayer ["Dispositivos Físicos"]
         RawDisk["Disco com Defeito - PhysicalDriveX"]
-        SafeTarget["Disco de Destino - Arquivo de Imagem .img"]
+        SafeTarget["Disco de Destino Independente - Imagem .img"]
     end
 
     GUI --> Orquestrador
     CLI --> Orquestrador
     
     Orquestrador --> DevScanner
+    Orquestrador --> DevResolver
+    Orquestrador --> WriteBlocker
     Orquestrador --> SmartEngine
     Orquestrador --> SurfaceScanner
     Orquestrador --> GptParser
@@ -108,14 +112,18 @@ flowchart TD
 * Volumes NTFS armazenam uma cópia espelho exata do setor de inicialização no último setor do volume (`total_sectors - 1`).
 * O DiskRescue detecta quando o *Primary Boot Sector* foi danificado (deixando o disco no estado **RAW**), valida o setor de backup e restaura a inicialização com **snapshot binário preventivo**.
 
-### 2. 📊 Telemetria S.M.A.R.T. Preditiva & Diagnóstico de Cabo SATA
-* Analisa os atributos de falha física: `05` (Reallocated Sectors), `0A` (Spin Retry), `C5` (Current Pending), `C6` (Offline Uncorrectable).
-* **Detecção Inteligente do Cabo SATA (ID C7):** Se o disco registrar erros de CRC UltraDMA mas a contagem de setores realocados/pendentes for zero, o sistema alerta especificamente que a mídia magnética está íntegra e que o defeito reside no **cabo de dados SATA ou porta da placa-mãe**.
+### 2. 📊 Telemetria S.M.A.R.T. Preditiva com Rigor Forense
+* **Separação Estruturada:** Cada relatório separa categoricamente **Evidências Observadas**, **Hipóteses Prováveis**, **Limitações da Telemetria** e **Ações Sugeridas**.
+* **Sem Falsos Normalizados:** O sistema não injeta valores normalizados fictícios (`current=100`, `worst=100`, etc.) quando apenas contadores brutos são fornecidos pelo sistema operacional.
+* **Diagnóstico Probabilístico de Cabo SATA (ID C7):** Quando ocorrem erros de CRC UltraDMA sem setores pendentes ou realocados, o relatório apresenta a hipótese de falha elétrica no cabo/conector SATA e recomenda a criação de imagem antes de qualquer ação, sem garantir saúde total prematura da mídia.
+* **Cuidado na Recomendação:** Nenhum disco é rotulado como "100% seguro para reparo", preservando a regra de sempre gerar snapshot ou imagem antes de qualquer intervenção.
 
 ### 3. 💾 Motor de Clonagem Resiliente em Duas Fases (Estilo `ddrescue`)
-* **Fase 1 (Fast Pass):** Varre blocos grandes copiando rapidamente as áreas íntegras. Ao encontrar um bad sector, salta exponencialmente faixas de setores para afastar as cabeças magnéticas da região degradada.
-* **Fase 2 (Surgical Scraping):** Raspa setor por setor (512 bytes) apenas nas bordas dos blocos não lidos.
-* **Arquivo de Mapa (`.map`):** Toda a operação é persistida em log. Se o computador for desligado ou o disco superaquecer, a transferência pode ser **retomada exatamente de onde parou**.
+* **Contabilização Integral de LBAs:** Todos os setores no intervalo `[0, total_sectors)` são rigorosamente mapeados como `+` (resgatado), `*` (pulado na Fase 1 para evitar atrito mecânico) ou `-` (bad sector irrecuperável confirmado na Fase 2). Zero lacunas silenciosas preenchidas com zeros sem registro.
+* **Fase 1 (Fast Pass):** Varre blocos grandes copiando rapidamente as áreas íntegras. Ao encontrar um bad sector, salta à frente para afastar as cabeças magnéticas da região degradada e registra toda a faixa saltada para raspagem posterior.
+* **Fase 2 (Surgical Scraping):** Raspa setor por setor (512 bytes) em todas as regiões puladas. Setores ilegíveis recebem zeros para preservar o offset exato da imagem.
+* **Arquivo de Mapa Atômico (`.map`):** Validação estrita de identidade de origem e destino ao carregar. Persistência atômica via arquivo temporário e `os.replace`. Retomada verídica que pula blocos já resgatados e continua exatamente dos setores pendentes.
+* **Diferenciação de Resultado:** Distinção explícita entre clonagem 100% íntegra (`fully_recovered=True`) e clonagem com resgate parcial preenchida com zeros em bad sectors.
 
 ### 4. 🧩 Suporte a Partições MBR Legadas
 * Parser completo de entradas MBR clássicas (LBA 0), validação de assinatura `0x55AA` e injeção/reconstrução cirúrgica de partições órfãs identificadas por varredura forense.
@@ -124,12 +132,14 @@ flowchart TD
 * Suporte nativo a pendrives e cartões de memória (SD/microSD).
 * Decodifica o BIOS Parameter Block (BPB), extrai tabelas FAT, calcula o cluster raiz e identifica volumes órfãos mesmo sem tabela de partição registrada.
 
-### 6. 📁 File Carving Forense (Resgate Direto de Arquivos)
-* Extrai arquivos diretamente a partir de fluxos de setores brutos sem depender de sistemas de arquivos ou MFT:
+### 6. 📁 File Carving Forense Contínuo (Multi-bloco)
+* Extração direta a partir de fluxos de setores brutos com capacidade de **atravessar fronteiras de blocos** (cross-block stream carving) para arquivos maiores que 1 MiB e dezenas de megabytes.
+* Delimitadores suportados:
   * **JPG / JPEG:** Cabeçalho `FF D8 FF` e trailer `FF D9`.
   * **PNG:** Cabeçalho `89 50 4E 47` e trailer de chunk `IEND`.
-  * **PDF:** Cabeçalho `%PDF-` e delimitador `%%EOF`.
-  * **ZIP / DOCX / XLSX:** Cabeçalho `PK\x03\x04` e End of Central Directory.
+  * **PDF:** Cabeçalho `%PDF-` e delimitador `%%EOF` (revisões contínuas).
+  * **ZIP / DOCX / XLSX:** Cabeçalho `PK\x03\x04` e End of Central Directory (`PK\x05\x06`).
+* **Validação Estrutural e Isolamento:** Verificação pós-extração (`zipfile.testzip()`, integridade de marcadores PDF/PNG/JPEG). Falsos positivos e arquivos corrompidos são isolados com sufixo `_corrupted` ou descartados (`discard_invalid=True`), nunca contabilizados como resgates íntegros.
 
 ### 7. 📈 Varredura de Superfície com Mapa de Calor (Heatmap)
 * Medição de latência precisa por bloco com classificação visual em tempo real:
@@ -158,42 +168,49 @@ flowchart TD
 ## 🛡️ Política de Segurança Inviolável (*Do No Harm*)
 
 O DiskRescue foi concebido com foco absoluto na integridade física e preservação dos dados:
-1. **Modo Somente Leitura por Padrão (Write-Blocker):** Ferramentas de diagnóstico, telemetria SMART, varredura de superfície e carving operam com leitura estrita e são testadas para garantir que nunca disparam escritas na mídia sob análise.
-2. **Bloqueio P0 de Origem e Destino:** O sistema valida identificadores e impede categoricamente que a imagem de saída ou pasta de carving coincidam com o dispositivo de origem.
+1. **Modo Somente Leitura por Padrão (Write-Blocker):** Suíte auditada com `StrictReadOnlyDeviceStream`. Qualquer tentativa indevida de escrita (`write`, `writelines`, `truncate`) levanta `WriteBlockViolationError`.
+2. **Bloqueio P0 de Disco Físico (Device Resolver):** Resolução profunda de hardware via `IOCTL_STORAGE_GET_DEVICE_NUMBER`. Bloqueia sumariamente a gravação se a imagem de destino ou pasta de carving estiver em qualquer partição do mesmo disco físico da origem (ex: `\\.\PhysicalDrive0` vs `C:\` ou `B:\`).
 3. **Snapshots Preventivos Obrigatórios:** Nenhuma gravação de setor físico é executada sem que uma cópia binária exata do setor original seja gravada no disco local (`mbr_backup_*.bin`, `ntfs_vbr_backup_*.bin`).
-4. **Validação Estrutural Pós-Carving:** Arquivos resgatados passam por checagem de integridade (estrutura ZIP, marcadores PDF e delimitadores de imagem) para minimizar falsos positivos.
+4. **Validação Estrutural Pós-Carving:** Arquivos resgatados passam por checagem de integridade (estrutura ZIP, marcadores PDF e delimitadores de imagem) para eliminar falsos positivos.
 5. **Cancelamento Gracioso:** Todas as threads de clonagem, varredura de superfície e carving respondem a sinais de interrupção imediata preservando o progresso salvo.
 
 ---
 
 ## 🧪 Cobertura de Testes Automatizados
 
-O sistema conta com suíte completa de testes unitários automatizados com discos sintéticos em memória e arquivos temporários:
+O sistema conta com suíte completa de 26 testes unitários automatizados com discos sintéticos em memória, streams bloqueadores e arquivos temporários:
 
 ```bash
 $ pytest tests/ -v
 ============================= test session starts =============================
-tests/test_carver.py::test_carver_detects_and_extracts_files PASSED      [  5%]
-tests/test_fat_exfat.py::test_parse_fat32_and_exfat PASSED               [ 10%]
-tests/test_fat_exfat.py::test_scan_boot_sectors_discovers_fat32_and_exfat PASSED [ 15%]
-tests/test_gpt_repair.py::test_parse_gpt_valida_crc PASSED               [ 21%]
-tests/test_gpt_repair.py::test_rebuild_gpt_corrige_offset_e_recalcula_crc PASSED [ 26%]
-tests/test_mbr.py::test_parse_and_rebuild_mbr PASSED                     [ 31%]
-tests/test_mbr.py::test_repair_mbr_partition_in_file PASSED              [ 36%]
+tests/test_carver.py::test_carver_detects_and_extracts_files PASSED      [  3%]
+tests/test_carver.py::test_carver_cross_block_large_file_over_1mb PASSED [  7%]
+tests/test_carver.py::test_carver_file_crossing_boundary_over_4kb PASSED [ 11%]
+tests/test_carver.py::test_carver_handles_false_signatures_and_truncated_files PASSED [ 15%]
+tests/test_fat_exfat.py::test_parse_fat32_and_exfat PASSED               [ 19%]
+tests/test_fat_exfat.py::test_scan_boot_sectors_discovers_fat32_and_exfat PASSED [ 23%]
+tests/test_gpt_repair.py::test_parse_gpt_valida_crc PASSED               [ 26%]
+tests/test_gpt_repair.py::test_rebuild_gpt_corrige_offset_e_recalcula_crc PASSED [ 30%]
+tests/test_mbr.py::test_parse_and_rebuild_mbr PASSED                     [ 34%]
+tests/test_mbr.py::test_repair_mbr_partition_in_file PASSED              [ 38%]
 tests/test_ntfs_boot_repair.py::test_diagnose_and_restore_ntfs_boot_sector PASSED [ 42%]
-tests/test_resilient_clone.py::test_resilient_clone_clean_disk PASSED    [ 47%]
-tests/test_resilient_clone.py::test_resilient_clone_with_bad_sectors_skip_and_scrape PASSED [ 52%]
-tests/test_safety_write_blocker.py::test_diagnostic_and_carver_scans_never_write_to_source PASSED [ 57%]
-tests/test_safety_write_blocker.py::test_cloner_blocks_same_source_and_destination PASSED [ 63%]
-tests/test_safety_write_blocker.py::test_carver_blocks_output_dir_on_source PASSED [ 68%]
-tests/test_safety_write_blocker.py::test_carver_structural_integrity_verification PASSED [ 73%]
-tests/test_smart_diagnostics.py::test_smart_healthy PASSED               [ 78%]
-tests/test_smart_diagnostics.py::test_smart_sata_cable_fault_detected PASSED [ 84%]
-tests/test_smart_diagnostics.py::test_smart_surface_critical_degradation PASSED [ 89%]
-tests/test_smart_diagnostics.py::test_smart_mechanical_spin_retry PASSED [ 94%]
+tests/test_resilient_clone.py::test_resilient_clone_clean_disk PASSED    [ 46%]
+tests/test_resilient_clone.py::test_resilient_clone_synthetic_lba_exact_verification PASSED [ 50%]
+tests/test_resilient_clone.py::test_resilient_clone_resume_from_interrupted_map PASSED [ 53%]
+tests/test_resilient_clone.py::test_clone_map_rejects_mismatched_device PASSED [ 57%]
+tests/test_safety_write_blocker.py::test_strict_read_only_stream_throws_on_any_write PASSED [ 61%]
+tests/test_safety_write_blocker.py::test_instrumented_stream_with_carver_and_parsers PASSED [ 65%]
+tests/test_safety_write_blocker.py::test_cloner_source_never_receives_writes PASSED [ 69%]
+tests/test_safety_write_blocker.py::test_physical_drive_conflict_detection_blocks_same_disk PASSED [ 73%]
+tests/test_safety_write_blocker.py::test_cloner_blocks_exact_same_file PASSED [ 76%]
+tests/test_safety_write_blocker.py::test_carver_structural_integrity_verification PASSED [ 80%]
+tests/test_smart_diagnostics.py::test_smart_healthy PASSED               [ 84%]
+tests/test_smart_diagnostics.py::test_smart_sata_cable_fault_detected PASSED [ 88%]
+tests/test_smart_diagnostics.py::test_smart_surface_critical_degradation PASSED [ 92%]
+tests/test_smart_diagnostics.py::test_smart_mechanical_spin_retry PASSED [ 96%]
 tests/test_surface_scan.py::test_surface_scan_measures_blocks PASSED     [100%]
 
-============================= 19 passed in 4.70s ==============================
+============================= 26 passed in 3.30s ==============================
 ```
 
 ---

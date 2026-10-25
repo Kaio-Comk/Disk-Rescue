@@ -33,6 +33,7 @@ from core.filesystem.ntfs_boot_repair import (
     restore_ntfs_boot_from_backup,
 )
 from core.filesystem.scanner import DiscoveredFilesystem, scan_boot_sectors
+from core.hardware.device_resolver import assert_safe_source_and_destination
 from core.hardware.scanner import DiskInfo, is_admin, relaunch_as_admin, scan_disks
 from core.hardware.smart import SmartRiskLevel, query_smart_report_windows
 from core.hardware.surface_scan import SurfaceBlockResult, SurfaceScanSummary, scan_surface_latency
@@ -40,7 +41,7 @@ from core.partition.gpt import parse_gpt
 from core.partition.mbr import parse_mbr
 from core.recovery.carver import CarvedFile, FileCarver
 from core.recovery.repair import repair_gpt_partition_offset
-from core.recovery.resilient_clone import ResilientCloneStats, ResilientCloner
+from core.recovery.resilient_clone import CloningResult, ResilientCloneStats, ResilientCloner
 
 
 class DiskRescueApp:
@@ -799,26 +800,42 @@ class DiskRescueApp:
 
         target_disk = self.selected_disk
 
-        # Validação P0 de segurança: impedir que origem e destino sejam o mesmo
-        clean_dev = target_disk.device_path.replace("\\\\.\\", "").replace("\\", "/").lower()
-        clean_dst = str(Path(dest).resolve()).replace("\\", "/").lower()
-        if clean_dev and (clean_dev == clean_dst or clean_dst.endswith(clean_dev)):
-            messagebox.showerror("Bloqueio de Segurança P0", "A origem e o destino não podem ser o mesmo dispositivo!")
+        # Validação P0 de segurança: impedir categoricamente que a imagem seja gravada no mesmo disco físico
+        try:
+            assert_safe_source_and_destination(target_disk.device_path, Path(dest))
+        except ValueError as err:
+            messagebox.showerror("Bloqueio de Segurança P0", str(err))
             return
 
         self.btn_start_clone.config(state=tk.DISABLED)
         self.btn_cancel_clone.config(state=tk.NORMAL)
         total_sectors = target_disk.size_bytes // 512
 
-        cloner = ResilientCloner(target_disk.device_path, Path(dest), total_sectors)
+        try:
+            cloner = ResilientCloner(target_disk.device_path, Path(dest), total_sectors)
+        except Exception as err:
+            messagebox.showerror("Erro de Inicialização", str(err))
+            self.btn_start_clone.config(state=tk.NORMAL)
+            self.btn_cancel_clone.config(state=tk.DISABLED)
+            return
+
         self.cloner_instance = cloner
 
         def progress_cb(stats: ResilientCloneStats):
             self.msg_queue.put(("clone_stats", stats))
 
         def worker():
-            ok = cloner.run(progress_cb=progress_cb)
-            self.msg_queue.put(("status", "Clonagem concluída." if ok else "Clonagem pausada/cancelada."))
+            res = cloner.run(progress_cb=progress_cb)
+            if not res.success:
+                status_text = "Clonagem cancelada pelo operador."
+            elif res.fully_recovered:
+                status_text = f"Clonagem 100% concluída: {res.rescued_sectors:,} setores resgatados com sucesso."
+            else:
+                status_text = (
+                    f"Clonagem concluída com resgate parcial: {res.rescued_sectors:,} setores OK, "
+                    f"{res.bad_sectors:,} bad sectors identificados."
+                )
+            self.msg_queue.put(("status", status_text))
             self.btn_start_clone.config(state=tk.NORMAL)
             self.btn_cancel_clone.config(state=tk.DISABLED)
 
@@ -857,11 +874,11 @@ class DiskRescueApp:
         out_path = Path(out_str)
         target_disk = self.selected_disk
 
-        # Validação P0 de segurança: impedir salvar na própria origem
-        clean_dev = target_disk.device_path.replace("\\\\.\\", "").replace("\\", "/").lower()
-        clean_out = str(out_path.resolve()).replace("\\", "/").lower()
-        if clean_dev and (clean_dev == clean_out or clean_out.startswith(clean_dev)):
-            messagebox.showerror("Bloqueio de Segurança P0", "A pasta de destino do carving não pode ser o dispositivo de origem!")
+        # Validação P0 de segurança: impedir salvar na própria origem ou mesmo disco físico
+        try:
+            assert_safe_source_and_destination(target_disk.device_path, out_path, is_directory=True)
+        except ValueError as err:
+            messagebox.showerror("Bloqueio de Segurança P0", str(err))
             return
 
         out_path.mkdir(parents=True, exist_ok=True)

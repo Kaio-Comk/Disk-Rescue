@@ -1,5 +1,6 @@
 """
 core/hardware/smart.py — Decodificação e interpretação preditiva de telemetria SMART em HDDs e SSDs.
+Separa evidências observadas, hipóteses prováveis, limitações de telemetria e ações sugeridas com rigor forense.
 """
 from __future__ import annotations
 
@@ -23,10 +24,10 @@ class SmartRiskLevel(Enum):
 class SmartAttribute:
     id: int
     name: str
-    current: int
-    worst: int
-    threshold: int
-    raw_value: int
+    current: Optional[int] = None
+    worst: Optional[int] = None
+    threshold: Optional[int] = None
+    raw_value: int = 0
     is_failing: bool = False
     description: str = ""
 
@@ -48,6 +49,11 @@ class SmartReport:
     attributes: Dict[int, SmartAttribute] = field(default_factory=dict)
     summary_messages: List[str] = field(default_factory=list)
     action_recommendation: str = ""
+    # Seções estruturadas para relatório técnico rigoroso
+    evidencia_observada: List[str] = field(default_factory=list)
+    hipotese_provavel: List[str] = field(default_factory=list)
+    limitacoes: List[str] = field(default_factory=list)
+    acao_sugerida: str = ""
 
 
 SMART_DEFINITIONS = {
@@ -70,9 +76,14 @@ def analyze_smart_data(
     model: str,
     serial: str,
     raw_attributes: Dict[int, int],
-    temperature_c: Optional[int] = None
+    temperature_c: Optional[int] = None,
+    normalized_attributes: Optional[Dict[int, tuple[int, int, int]]] = None
 ) -> SmartReport:
-    """Interpreta valores brutos SMART e gera diagnóstico técnico com regras forenses."""
+    """
+    Interpreta valores brutos SMART e gera diagnóstico técnico com regras forenses.
+    Não preenche valores normalizados fictícios (current/worst/threshold) a menos que
+    fornecidos explicitamente pelo hardware.
+    """
     reallocated = raw_attributes.get(5, 0)
     pending = raw_attributes.get(197, 0)
     uncorrectable = raw_attributes.get(198, 0)
@@ -83,41 +94,78 @@ def analyze_smart_data(
     attributes: Dict[int, SmartAttribute] = {}
     for aid, raw_val in raw_attributes.items():
         name, desc = SMART_DEFINITIONS.get(aid, (f"Atributo {aid}", "Atributo de telemetria do fabricante"))
+        cur, worst, thresh = (None, None, None)
+        if normalized_attributes and aid in normalized_attributes:
+            cur, worst, thresh = normalized_attributes[aid]
+
         attributes[aid] = SmartAttribute(
             id=aid,
             name=name,
-            current=100,
-            worst=100,
-            threshold=10,
+            current=cur,
+            worst=worst,
+            threshold=thresh,
             raw_value=raw_val,
             description=desc
         )
 
+    evidencias: List[str] = []
+    hipoteses: List[str] = []
+    limitacoes: List[str] = [
+        "A telemetria S.M.A.R.T. reflete apenas os contadores relatados pelo firmware do fabricante.",
+        "A ausência de erros registrados não comprova que a mídia magnética ou células flash estejam 100% íntegras."
+    ]
+
     messages = []
     risk = SmartRiskLevel.GREEN
-    recommendation = "O disco apresenta parâmetros saudáveis. Operações de reparo de partição são seguras."
+    recommendation = (
+        "O disco apresenta parâmetros monitorados saudáveis e estáveis. "
+        "Recomenda-se realizar snapshot de segurança antes de qualquer intervenção estrutural ou particionamento."
+    )
 
     # Regra 1: Mau contato de Cabo SATA / USB
     if crc_err > 0 and reallocated == 0 and pending == 0 and uncorrectable == 0:
         risk = SmartRiskLevel.YELLOW
-        messages.append(
+        evidencias.append(f"Contador UltraDMA CRC (ID 199/0xC7): {crc_err} erros registrados na interface.")
+        evidencias.append("Zero setores pendentes (C5), realocados (05) ou offline uncorrectable (C6) observados.")
+        hipoteses.append(
+            "Indício de degradação na comunicação física (cabo de dados SATA, conector oxidado ou porta na placa-mãe). "
+            "A mídia física não apresenta setores defeituosos registrados até o momento."
+        )
+        limitacoes.append(
+            "Erros de CRC são um indicativo de problema de transmissão, mas não excluem a possibilidade de "
+            "danos não detectados na controladora do próprio disco."
+        )
+        msg_cabo = (
             f"🔍 INDÍCIO DE PROBLEMA DE CABO/INTERFACE: Detectados {crc_err} erros de CRC UltraDMA (ID 199/C7). "
             "Não foram observados setores pendentes ou realocados até o momento. Alta probabilidade de falha "
             "elétrica no cabo de dados SATA ou mau contato na porta. Recomenda-se substituir o cabo SATA e monitorar a integridade."
         )
-        recommendation = "Substitua o cabo SATA ou conecte em outra porta da placa-mãe. Não condene o disco sem antes testar a superfície."
+        messages.append(msg_cabo)
+        recommendation = (
+            "Substitua o cabo SATA ou conecte em outra porta da placa-mãe. "
+            "Gere uma imagem forense antes de submeter o disco a esforços intensos e execute teste de superfície."
+        )
 
     # Regra 2: Degradação de Superfície / Bad Sectors
     if pending > 0 or reallocated > 0 or uncorrectable > 0:
+        evidencias.append(
+            f"Setores pendentes (197): {pending} | Setores remapeados (5): {reallocated} | "
+            f"Irrecuperáveis (198): {uncorrectable}"
+        )
         if pending > 20 or reallocated > 100 or uncorrectable > 0:
             risk = SmartRiskLevel.RED
+            hipoteses.append("Degradação física severa da superfície magnética ou esgotamento de blocos de reserva.")
             messages.append(
                 f"🚨 FALHA CRÍTICA DE MÍDIA: {pending} setores pendentes (C5), {reallocated} setores remapeados (05) "
                 f"e {uncorrectable} irrecuperáveis (C6). A superfície magnética está degradando rapidamente."
             )
-            recommendation = "RISCO IMINENTE: Crie imediatamente uma Imagem Forense (.img). NÃO execute chkdsk ou formatação."
+            recommendation = (
+                "RISCO IMINENTE: Crie imediatamente uma Imagem Forense (.img) via Clonagem Resiliente. "
+                "NÃO execute chkdsk, desfragmentação ou formatação."
+            )
         else:
             risk = SmartRiskLevel.YELLOW
+            hipoteses.append("Presença de setores instáveis sendo monitorados ou remapeados pelo firmware.")
             messages.append(
                 f"⚠️ ATENÇÃO: Detectados {pending} setores pendentes e {reallocated} setores remapeados. "
                 "Existem bad sectors sendo monitorados pelo firmware."
@@ -127,6 +175,8 @@ def analyze_smart_data(
     # Regra 3: Fadiga Mecânica no Motor
     if spin_retry > 0:
         risk = SmartRiskLevel.RED
+        evidencias.append(f"Tentativas de rotação do motor (ID 10): {spin_retry} eventos registrados.")
+        hipoteses.append("Fadiga mecânica no rolamento do motor de rotação ou fornecimento elétrico instável.")
         messages.append(
             f"⚙️ FADIGA MECÂNICA: {spin_retry} falhas de inicialização do motor (ID 10/0A). "
             "O motor de rotação ou o rolamento está tendo dificuldade para atingir a rotação nominal."
@@ -134,6 +184,8 @@ def analyze_smart_data(
         recommendation = "Evite desligar e ligar o disco frequentemente. Faça cópia de emergência ininterrupta."
 
     if not messages:
+        evidencias.append("Nenhum erro de leitura bruta, remapeamento ou CRC registrado nos atributos consultados.")
+        hipoteses.append("Mídia operando dentro dos parâmetros nominais para os atributos monitorados.")
         messages.append("Nenhum erro de leitura, remapeamento ou comunicação física detectado.")
 
     return SmartReport(
@@ -151,7 +203,11 @@ def analyze_smart_data(
         power_on_hours=power_hours,
         attributes=attributes,
         summary_messages=messages,
-        action_recommendation=recommendation
+        action_recommendation=recommendation,
+        evidencia_observada=evidencias,
+        hipotese_provavel=hipoteses,
+        limitacoes=limitacoes,
+        acao_sugerida=recommendation
     )
 
 

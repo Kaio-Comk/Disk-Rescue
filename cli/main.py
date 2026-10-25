@@ -32,7 +32,7 @@ except ImportError:
 def banner():
     txt = """
     ╔═══════════════════════════════════════════════════════════════╗
-    ║                🛠️  D I S K R E S C U E  v0.1.0                ║
+    ║                🛠️  D I S K R E S C U E  v0.2.1                ║
     ║        Sistema Autônomo de Diagnóstico e Recuperação          ║
     ╚═══════════════════════════════════════════════════════════════╝
     """
