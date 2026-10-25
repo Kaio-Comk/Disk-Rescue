@@ -3,10 +3,12 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 datas = []
 datas += collect_data_files('sv_ttk')
+datas += [('gui/assets', 'gui/assets'), ('gui/assets', 'assets')]
 
 hiddenimports = []
 hiddenimports += collect_submodules('core')
 hiddenimports += collect_submodules('gui')
+hiddenimports += ['sv_ttk', 'PIL', 'PIL.Image', 'PIL.ImageTk']
 
 a = Analysis(
     ['diskrescue_gui.pyw'],
@@ -44,4 +46,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     uac_admin=True,
+    icon='gui/assets/diskrescue.ico',
 )
