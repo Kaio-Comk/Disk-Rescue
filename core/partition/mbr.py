@@ -41,6 +41,18 @@ class MBRPartitionEntry:
     def is_empty(self) -> bool:
         return self.type_id == 0 or self.sector_count == 0
 
+    @property
+    def size_sectors(self) -> int:
+        return self.sector_count
+
+    @property
+    def type_code(self) -> int:
+        return self.type_id
+
+    @property
+    def is_bootable(self) -> bool:
+        return self.is_active
+
 
 @dataclass
 class MBRTable:

@@ -25,6 +25,7 @@ class DiscoveredFilesystem:
     label: str = ""
     is_verified: bool = False
     details: dict = None
+    sector_size: int = 512
 
     @property
     def size_gb(self) -> float:
@@ -39,7 +40,8 @@ def scan_boot_sectors(
     device_path: str,
     max_lba: int = 2_000_000,
     chunk_sectors: int = 2048,
-    progress_cb: Callable[[int, int], None] | None = None
+    progress_cb: Callable[[int, int], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> list[DiscoveredFilesystem]:
     """Varre os primeiros setores do disco procurando assinaturas de Boot Sector válidas."""
     discovered: list[DiscoveredFilesystem] = []
@@ -48,6 +50,8 @@ def scan_boot_sectors(
     try:
         with open(device_path, "rb") as f:
             for lba in range(0, max_lba, chunk_sectors):
+                if cancel_check and cancel_check():
+                    break
                 if progress_cb:
                     progress_cb(lba, max_lba)
                 f.seek(lba * 512)

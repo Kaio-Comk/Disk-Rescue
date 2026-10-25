@@ -251,6 +251,7 @@ class FileCarver:
         footer_pos_in_file = -1
         found_footer = False
 
+        write_failed_exc: Optional[Exception] = None
         try:
             with open(candidate_path, "wb") as out_f:
                 while total_written < max_size and not self.cancel_requested:
@@ -259,7 +260,11 @@ class FileCarver:
                     if not chunk:
                         break
 
-                    out_f.write(chunk)
+                    try:
+                        out_f.write(chunk)
+                    except OSError as w_err:
+                        write_failed_exc = w_err
+                        raise
                     prev_total = total_written
                     total_written += len(chunk)
 
@@ -284,7 +289,11 @@ class FileCarver:
                                     needed = min(target_end - total_written, max_size - total_written)
                                     extra = stream.read(needed)
                                     if extra:
-                                        out_f.write(extra)
+                                        try:
+                                            out_f.write(extra)
+                                        except OSError as w_err:
+                                            write_failed_exc = w_err
+                                            raise
                                         total_written += len(extra)
                                 footer_pos_in_file = min(total_written, target_end)
                                 found_footer = True
@@ -300,12 +309,28 @@ class FileCarver:
 
                     rolling_tail = combined[-128 * 1024:] if len(combined) > 128 * 1024 else combined
 
-                if found_footer and footer_pos_in_file >= len(header_sig) + 4:
-                    out_f.flush()
-                    out_f.truncate(footer_pos_in_file)
+                if self.cancel_requested:
+                    found_footer = False
+                elif found_footer and footer_pos_in_file >= len(header_sig) + 4:
+                    try:
+                        out_f.flush()
+                        out_f.truncate(footer_pos_in_file)
+                    except OSError as w_err:
+                        write_failed_exc = w_err
+                        raise
                 else:
                     found_footer = False
 
+        except OSError as os_exc:
+            if write_failed_exc is not None or not candidate_path.exists():
+                try:
+                    candidate_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                log.error("Erro de gravação no destino durante extração de %s: %s", temp_name, os_exc)
+                raise
+            log.warning("Erro de leitura durante extração de candidato %s: %s", temp_name, os_exc)
+            found_footer = False
         except Exception as exc:
             log.warning("Erro durante extração em disco de candidato %s: %s", temp_name, exc)
             found_footer = False
@@ -461,6 +486,7 @@ class FileCarver:
 
         except Exception as exc:
             log.error("Erro durante File Carving: %s", exc)
+            raise
         finally:
             if should_close:
                 try:

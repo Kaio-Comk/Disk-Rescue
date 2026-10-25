@@ -162,3 +162,118 @@ def test_create_raw_disk_image_handles_fsync_failure(tmp_path, monkeypatch):
     assert not dst.exists()
     assert len(list(tmp_path.glob("*.tmp"))) == 0
 
+
+def test_create_raw_disk_image_rejects_excessive_chunk_memory_and_non_512_multiple(tmp_path):
+    """P0/3.3: Valida alinhamento de setor (múltiplo de 512) e limite máximo de memória por bloco (64 MiB)."""
+    src = tmp_path / "mem_src.bin"
+    src.write_bytes(b"\x11" * 1024)
+    dst = tmp_path / "mem_dst.img"
+
+    with pytest.raises(ValueError, match="múltiplo de 512"):
+        create_raw_disk_image(str(src), dst, sector_size=500)
+
+    with pytest.raises(ValueError, match="excede o limite"):
+        create_raw_disk_image(str(src), dst, sector_size=512, chunk_sectors=200_000)
+
+
+def test_create_raw_disk_image_empty_source_returns_partial(tmp_path):
+    """P0/3.3: Origem vazia (0 bytes lidos) nunca pode retornar COMPLETED."""
+    src = tmp_path / "empty_src.bin"
+    src.write_bytes(b"")
+    dst = tmp_path / "empty_dst.img"
+
+    res = create_raw_disk_image(str(src), dst, sector_size=512)
+    assert res.status == RawImageStatus.PARTIAL
+    assert bool(res) is False
+    assert res.sectors_written == 0
+    assert not dst.exists()
+
+
+def test_create_raw_disk_image_preserves_existing_destination_on_failed_overwrite(tmp_path, monkeypatch):
+    """P0/3.2: Quando allow_overwrite=True, falha durante a criação da nova imagem preserva a imagem anterior válida."""
+    src = tmp_path / "bad_src.bin"
+    src.write_bytes(b"\x22" * 700)  # Tamanho desalinhado -> falha de leitura
+    dst = tmp_path / "precious_existing.img"
+    dst.write_bytes(b"VALID_PREVIOUS_IMAGE_BYTES" * 64)
+    original_bytes = dst.read_bytes()
+
+    res = create_raw_disk_image(str(src), dst, sector_size=512, allow_overwrite=True)
+    assert res.status == RawImageStatus.READ_ERROR
+    assert dst.exists()
+    assert dst.read_bytes() == original_bytes
+    assert len(list(tmp_path.glob("*.tmp"))) == 0
+
+
+def test_create_raw_disk_image_concurrent_processes_no_overwrite_race(tmp_path):
+    """
+    P0/3.1: Testa dois processos concorrentes tentando finalizar imagens no mesmo destino
+    com allow_overwrite=False sincronizados para passar na verificação inicial ao mesmo tempo.
+    Apenas UM processo pode vencer a finalização atômica; o outro deve falhar sem sobrescrever.
+    """
+    import subprocess
+    import sys
+
+    src_a = tmp_path / "src_proc_a.bin"
+    src_b = tmp_path / "src_proc_b.bin"
+    payload_a = b"PROCESS_A_IMAGE_" * 128  # 2048 bytes (4 setores)
+    payload_b = b"PROCESS_B_IMAGE_" * 128  # 2048 bytes (4 setores)
+    src_a.write_bytes(payload_a)
+    src_b.write_bytes(payload_b)
+
+    shared_dst = tmp_path / "shared_target.img"
+    ready_a = tmp_path / "ready_a.flag"
+    ready_b = tmp_path / "ready_b.flag"
+
+    worker_code = """
+import sys, time
+from pathlib import Path
+from core.recovery.repair import create_raw_disk_image
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+my_flag = Path(sys.argv[3])
+other_flag = Path(sys.argv[4])
+
+def sync_progress(cur, total, speed):
+    my_flag.write_text("ready")
+    deadline = time.time() + 5.0
+    while not other_flag.exists() and time.time() < deadline:
+        time.sleep(0.01)
+
+try:
+    res = create_raw_disk_image(str(src), dst, sector_size=512, chunk_sectors=2, allow_overwrite=False, progress_cb=sync_progress)
+    print(f"STATUS:{res.status.value}")
+except FileExistsError:
+    print("STATUS:replace_error")
+"""
+    proc_a = subprocess.Popen(
+        [sys.executable, "-c", worker_code, str(src_a), str(shared_dst), str(ready_a), str(ready_b)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    proc_b = subprocess.Popen(
+        [sys.executable, "-c", worker_code, str(src_b), str(shared_dst), str(ready_b), str(ready_a)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    out_a, err_a = proc_a.communicate(timeout=15)
+    out_b, err_b = proc_b.communicate(timeout=15)
+
+    statuses = [out_a.strip().upper(), out_b.strip().upper()]
+    assert statuses.count("STATUS:COMPLETED") == 1, f"Esperado exatamente 1 vencedor, obtido: {statuses} ({err_a} / {err_b})"
+    assert statuses.count("STATUS:REPLACE_ERROR") == 1, f"Esperado exatamente 1 bloqueio atômico, obtido: {statuses}"
+
+    assert shared_dst.exists()
+    final_bytes = shared_dst.read_bytes()
+    if out_a.strip().upper() == "STATUS:COMPLETED":
+        assert final_bytes == payload_a
+    else:
+        assert final_bytes == payload_b
+
+    # Nenhum arquivo .tmp pode restar
+    assert len(list(tmp_path.glob("*.tmp"))) == 0
+
+

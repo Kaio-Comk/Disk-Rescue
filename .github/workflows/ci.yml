@@ -35,21 +35,36 @@ jobs:
       run: |
         pyinstaller DiskRescue.spec --clean --noconfirm
 
-    - name: Verify Executable and Calculate SHA-256
+    - name: Verify Assets, Executable, Size and SHA-256
       if: matrix.python-version == '3.12'
       shell: powershell
       run: |
+        foreach ($asset in @("gui\assets\diskrescue.ico", "gui\assets\diskrescue.png")) {
+          if (!(Test-Path $asset)) {
+            Write-Error "Asset obrigatório ausente: $asset"
+            exit 1
+          }
+        }
         if (!(Test-Path "dist\DiskRescue.exe")) {
           Write-Error "dist\DiskRescue.exe não foi gerado pelo PyInstaller!"
           exit 1
         }
+        $item = Get-Item "dist\DiskRescue.exe"
+        $size = $item.Length
         $hash = (Get-FileHash "dist\DiskRescue.exe" -Algorithm SHA256).Hash
+        Write-Output "DiskRescue.exe Size (bytes): $size"
         Write-Output "DiskRescue.exe SHA-256: $hash"
 
-    - name: Run Smoke Test on Executable
+    - name: Run Smoke Test on Executable and Verify Exit Code
       if: matrix.python-version == '3.12'
+      shell: powershell
       run: |
-        .\dist\DiskRescue.exe --smoke-test
+        $proc = Start-Process -FilePath "dist\DiskRescue.exe" -ArgumentList "--smoke-test" -Wait -PassThru -NoNewWindow
+        Write-Output "Smoke Test Exit Code: $($proc.ExitCode)"
+        if ($proc.ExitCode -ne 0) {
+          Write-Error "Smoke test falhou com código $($proc.ExitCode)"
+          exit $proc.ExitCode
+        }
 
     - name: Upload Portable Executable Artifact
       if: matrix.python-version == '3.12'

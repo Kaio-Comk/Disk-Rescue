@@ -74,9 +74,17 @@ class GPTTable:
     is_header_crc_valid: bool = False
     is_entries_crc_valid: bool = False
 
+    @property
+    def header_crc32(self) -> int:
+        return self.header_crc
+
 
 def parse_gpt(f, sector_size: int = DEFAULT_SECTOR_SIZE) -> GPTTable | None:
     """Lê e valida o cabeçalho e tabela GPT a partir de um descritor de arquivo aberto."""
+    if sector_size <= 0 or sector_size % 512 != 0 or sector_size > 65536:
+        log.debug("Tamanho de setor inválido para GPT: %d", sector_size)
+        return None
+
     f.seek(1 * sector_size)
     header_data = f.read(sector_size)
     if len(header_data) < sector_size or header_data[:8] != GPT_HEADER_SIGNATURE:
@@ -102,8 +110,28 @@ def parse_gpt(f, sector_size: int = DEFAULT_SECTOR_SIZE) -> GPTTable | None:
         log.debug("Cabeçalho GPT inválido: num_entries=%d fora do limite (1..1024).", num_entries)
         return None
 
-    if first_usable >= last_usable or part_lba < 2:
-        log.debug("Cabeçalho GPT inválido: first_usable=%d >= last_usable=%d ou part_lba=%d.", first_usable, last_usable, part_lba)
+    entries_len = num_entries * entry_size
+    entries_sectors = (entries_len + sector_size - 1) // sector_size
+
+    if cur_lba != 1 or first_usable >= last_usable or part_lba < 2:
+        log.debug(
+            "Cabeçalho GPT inválido: cur_lba=%d, first_usable=%d, last_usable=%d, part_lba=%d.",
+            cur_lba, first_usable, last_usable, part_lba
+        )
+        return None
+
+    if part_lba + entries_sectors > first_usable:
+        log.debug(
+            "Cabeçalho GPT inválido: tabela primária (LBA %d..%d) invade first_usable_lba (%d).",
+            part_lba, part_lba + entries_sectors - 1, first_usable
+        )
+        return None
+
+    if backup_lba <= last_usable:
+        log.debug(
+            "Cabeçalho GPT inválido: backup_lba (%d) <= last_usable_lba (%d).",
+            backup_lba, last_usable
+        )
         return None
 
     # Validação do CRC do cabeçalho (com o campo de CRC zerado durante o cálculo)
@@ -114,8 +142,11 @@ def parse_gpt(f, sector_size: int = DEFAULT_SECTOR_SIZE) -> GPTTable | None:
 
     # Leitura dos registros de partição
     f.seek(part_lba * sector_size)
-    entries_len = num_entries * entry_size
     entries_data = f.read(entries_len)
+    if len(entries_data) != entries_len:
+        log.debug("Tabela de partições GPT truncada: lidos %d de %d bytes.", len(entries_data), entries_len)
+        return None
+
     calc_part_crc = zlib.crc32(entries_data) & 0xFFFFFFFF
     entries_crc_valid = (calc_part_crc == part_crc)
 
@@ -188,10 +219,13 @@ def rebuild_gpt(
 def rebuild_backup_gpt(
     gpt: GPTTable,
     updated_partitions: list[GPTPartitionEntry],
-    sector_size: int = DEFAULT_SECTOR_SIZE
+    sector_size: int = DEFAULT_SECTOR_SIZE,
+    backup_entries_lba: int | None = None,
+    raw_backup_header: bytes | None = None,
 ) -> tuple[bytes, bytes, int]:
     """
     Reconstrói o cabeçalho e as entradas da GPT de Backup (localizada no fim do disco).
+    Respeita o partition_entries_lba do cabeçalho de backup quando fornecido e validado.
     Retorna (backup_header_bytes, entries_data, backup_entries_lba).
     """
     entries_data = bytearray(gpt.num_partition_entries * gpt.partition_entry_size)
@@ -203,17 +237,20 @@ def rebuild_backup_gpt(
 
     new_part_crc = zlib.crc32(entries_data) & 0xFFFFFFFF
     entries_sectors = (len(entries_data) + sector_size - 1) // sector_size
-    backup_entries_lba = gpt.backup_lba - entries_sectors
+    resolved_bkp_entries_lba = (
+        backup_entries_lba if backup_entries_lba is not None else (gpt.backup_lba - entries_sectors)
+    )
 
-    backup_header = bytearray(gpt.raw_header)
+    base_header = raw_backup_header if (raw_backup_header and len(raw_backup_header) == sector_size) else gpt.raw_header
+    backup_header = bytearray(base_header)
     struct.pack_into("<QQ", backup_header, 24, gpt.backup_lba, gpt.current_lba)
-    struct.pack_into("<Q", backup_header, 72, backup_entries_lba)
+    struct.pack_into("<Q", backup_header, 72, resolved_bkp_entries_lba)
     struct.pack_into("<I", backup_header, 88, new_part_crc)
     backup_header[16:20] = b"\x00\x00\x00\x00"
     new_header_crc = zlib.crc32(backup_header[:gpt.header_size]) & 0xFFFFFFFF
     struct.pack_into("<I", backup_header, 16, new_header_crc)
 
-    return bytes(backup_header), bytes(entries_data), backup_entries_lba
+    return bytes(backup_header), bytes(entries_data), resolved_bkp_entries_lba
 
 
 def create_lba_snapshot(device_path: str, output_path: Path, sector_count: int = 34, sector_size: int = DEFAULT_SECTOR_SIZE) -> bool:

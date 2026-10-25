@@ -404,4 +404,85 @@ def test_cloner_fsync_failure_raises_persistence_error(tmp_path: Path, monkeypat
     with pytest.raises(OSError, match="Falha de sincronização na imagem de destino|Falha de persistência física"):
         cloner.run(reader_fn=lambda lba, count: b"\x00" * (count * 512))
 
+    # Garante que o clone_map em memória não permaneceu marcado como '+' após falha de fsync
+    assert cloner.clone_map.rescued_sectors == 0
+
+
+def test_clone_map_rejects_inconsistent_header_counters_and_invalid_version(tmp_path: Path):
+    """Valida que load_map rejeita mapas cujos contadores no cabeçalho divergem da lista de blocos ou têm versão inválida."""
+    map_file = tmp_path / "inconsistent_counters.map"
+    img_file = tmp_path / "inconsistent_counters.img"
+    img_file.write_bytes(b"\x00" * (10 * SECTOR_SIZE))
+
+    # 1. rescued_sectors no cabeçalho (5) diverge da soma dos blocos '+' (10)
+    bad_counters = {
+        "version": "2.0",
+        "device_path": "mock://dev",
+        "output_image": str(img_file),
+        "total_sectors": 10,
+        "sector_size": 512,
+        "rescued_sectors": 5,
+        "bad_sectors": 0,
+        "skipped_sectors": 5,
+        "blocks": [{"start_lba": 0, "sector_count": 10, "status": "+"}],
+    }
+    map_file.write_text(json.dumps(bad_counters), encoding="utf-8")
+    assert CloneMap.load_map(map_file, "mock://dev", img_file, 10) is None
+
+    # 2. Versão desconhecida no cabeçalho
+    bad_version = dict(bad_counters, version="99.9", rescued_sectors=10, skipped_sectors=0)
+    map_file.write_text(json.dumps(bad_version), encoding="utf-8")
+    assert CloneMap.load_map(map_file, "mock://dev", img_file, 10) is None
+
+
+def test_cloner_detects_corrupted_destination_readback_and_rolls_back_memory_map(tmp_path: Path, monkeypatch):
+    """Valida que divergência na releitura incremental da imagem de destino aborta o clone e reverte o mapa em memória."""
+    import builtins
+    img_file = tmp_path / "corrupt_readback.img"
+    map_file = tmp_path / "corrupt_readback.map"
+
+    cloner = ResilientCloner(
+        device_path="mock://readback_dev",
+        output_image_path=img_file,
+        total_sectors=32,
+        block_sectors=16,
+        skip_step_sectors=16,
+        map_path=map_file,
+    )
+
+    real_open = builtins.open
+
+    class CorruptingDestFile:
+        def __init__(self, target):
+            self._target = target
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self._target.__exit__(*args)
+
+        def read(self, size=-1):
+            data = self._target.read(size)
+            # Corrompe os bytes lidos na verificação pós-escrita
+            return b"\xFF" * len(data)
+
+        def __getattr__(self, name):
+            return getattr(self._target, name)
+
+    def mock_open(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        if str(file) == str(img_file) and "r+b" in mode:
+            return CorruptingDestFile(f)
+        return f
+
+    monkeypatch.setattr(builtins, "open", mock_open)
+
+    with pytest.raises(OSError, match="Falha de coerência incremental"):
+        cloner.run(reader_fn=lambda lba, count: b"\xAA" * (count * SECTOR_SIZE))
+
+    # O mapa em memória deve ter sido revertido ao último checkpoint confirmado (0 setores resgatados)
+    assert cloner.clone_map.rescued_sectors == 0
+
+
 

@@ -24,10 +24,16 @@ def mock_gui():
     except Exception as e:
         pytest.skip(f"Ambiente headless sem suporte a Tkinter/Tcl: {e}")
 
-    app = DiskRescueApp(root)
+    app = DiskRescueApp(root, auto_refresh=False)
     root.update()
     yield app, root
     try:
+        import gc
+        app.is_running = False
+        for attr in ("chk_jpg_var", "chk_png_var", "chk_pdf_var", "chk_zip_var"):
+            if hasattr(app, attr):
+                delattr(app, attr)
+        gc.collect()
         root.update()
         root.destroy()
     except Exception:
@@ -314,6 +320,7 @@ def test_gui_operation_states_and_scan_ended_recovery(mock_gui):
     from gui.app import OperationState
     app, root = mock_gui
 
+    app.op_state = OperationState.IDLE
     assert app.op_state == OperationState.IDLE
 
     # Simula início de varredura
@@ -329,4 +336,174 @@ def test_gui_operation_states_and_scan_ended_recovery(mock_gui):
     assert app.is_scanning is False
     assert app.op_state == OperationState.IDLE
     assert str(app.btn_run_scan.cget("state")) == "normal"
+
+
+def test_gui_scan_boot_sectors_exception_recovers_ui_state(mock_gui, monkeypatch):
+    """P1/6.4: Valida que exceção levantada por scan_boot_sectors() dispara scan_error + scan_ended e recupera botões."""
+    import time
+    from tkinter import messagebox
+    from gui.app import OperationState
+
+    app, root = mock_gui
+    monkeypatch.setattr(messagebox, "showerror", lambda *args, **kwargs: None)
+
+    def boom_scan(*args, **kwargs):
+        raise RuntimeError("Falha catastrófica simulada em scan_boot_sectors")
+
+    monkeypatch.setattr("gui.app.scan_boot_sectors", boom_scan)
+
+    app.selected_disk = app.disks[0]
+    app._start_deep_scan()
+
+    # Aguarda término da thread worker e processa fila
+    deadline = time.time() + 3.0
+    while app.is_scanning and time.time() < deadline:
+        app._process_pending_messages()
+        root.update()
+        time.sleep(0.02)
+    app._process_pending_messages()
+
+    assert app.is_scanning is False
+    assert app.op_state == OperationState.FAILED
+    assert str(app.btn_run_scan.cget("state")) == "normal"
+    assert "Falha catastrófica simulada" in app.txt_console.get("1.0", tk.END)
+
+
+def test_gui_clone_fsync_failure_and_carver_write_failure_recover_state(mock_gui, monkeypatch, tmp_path):
+    """P1/6.4: Valida que clonagem falhando no fsync() e carving falhando durante escrita de arquivo recuperam a GUI."""
+    import os
+    import time
+    from tkinter import messagebox
+    from gui.app import OperationState
+
+    app, root = mock_gui
+    monkeypatch.setattr(messagebox, "showerror", lambda *args, **kwargs: None)
+    monkeypatch.setattr("gui.app.assert_safe_source_and_destination", lambda *a, **kw: None)
+
+    src_img = tmp_path / "gui_src.bin"
+    # Inclui assinatura JPEG + EOI para forçar escrita durante carving
+    jpeg_payload = b"\xff\xd8\xff\xe0" + b"\x11" * 100 + b"\xff\xd9"
+    src_img.write_bytes(jpeg_payload.ljust(4096, b"\x00"))
+
+    app.selected_disk = DiskInfo(
+        number=99,
+        device_path=str(src_img),
+        friendly_name="Synthetic GUI Disk",
+        serial_number="SYN99",
+        size_bytes=4096,
+        bus_type="SATA",
+        partition_style="GPT",
+        media_type="SSD",
+        health_status="Healthy",
+        operational_status="OK",
+        temperature=30,
+        read_errors=0,
+        write_errors=0,
+        wear=None,
+        is_read_only=False,
+        is_boot=False,
+        is_system=False,
+        can_open_raw=True,
+    )
+
+    # 1. Clonagem falhando no fsync()
+    dst_clone = tmp_path / "clone_fail.img"
+    app.txt_dest_image.delete(0, tk.END)
+    app.txt_dest_image.insert(0, str(dst_clone))
+
+    def fail_fsync(fd):
+        raise OSError("Erro de fsync simulado na GUI")
+
+    monkeypatch.setattr(os, "fsync", fail_fsync)
+    app._start_clone()
+
+    deadline = time.time() + 3.0
+    while app.cloner_instance is not None and time.time() < deadline:
+        app._process_pending_messages()
+        root.update()
+        time.sleep(0.02)
+    app._process_pending_messages()
+
+    assert app.cloner_instance is None
+    assert app.op_state == OperationState.FAILED
+    assert str(app.btn_start_clone.cget("state")) == "normal"
+    assert str(app.btn_cancel_clone.cget("state")) == "disabled"
+
+    # 2. Carving falhando durante a escrita do arquivo recuperado
+    carve_out = tmp_path / "carve_out"
+    app.txt_carve_dir.delete(0, tk.END)
+    app.txt_carve_dir.insert(0, str(carve_out))
+
+    import builtins
+    real_open = builtins.open
+
+    def fail_carve_write(file, mode="r", *args, **kwargs):
+        if "wb" in mode and "recovered_" in str(file):
+            raise OSError("Disco cheio simulado durante escrita do carver")
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", fail_carve_write)
+    app._start_carver()
+
+    deadline = time.time() + 3.0
+    while app.carver_instance is not None and time.time() < deadline:
+        app._process_pending_messages()
+        root.update()
+        time.sleep(0.02)
+    app._process_pending_messages()
+
+    assert app.carver_instance is None
+    assert app.op_state == OperationState.FAILED
+    assert str(app.btn_start_carve.cget("state")) == "normal"
+    assert str(app.btn_cancel_carve.cget("state")) == "disabled"
+
+
+def test_gui_cancellation_and_window_close_waits_for_active_operations(mock_gui, monkeypatch):
+    """P1/6.2, 6.3 & 6.4: Testa cancelamento cooperativo, fechamento durante operação ativa e eventos tardios."""
+    from gui.app import OperationState
+
+    app, root = mock_gui
+
+    # Simula operação ativa em andamento
+    app.is_running = True
+    app._closing_requested = False
+    app.closing_requested = False
+    app.is_scanning = True
+    app.op_state = OperationState.RUNNING
+
+    destroyed = {"called": False}
+
+    def track_destroy():
+        destroyed["called"] = True
+
+    monkeypatch.setattr(root, "destroy", track_destroy)
+    monkeypatch.setattr(root, "after", lambda ms, cb, *a: None)
+
+    # Solicita fechamento da janela enquanto is_scanning=True
+    app._on_close_window()
+    assert app.closing_requested is True
+    assert app.cancel_scan_flag is True
+    assert app.op_state == OperationState.CANCELLING
+    # A janela NÃO pode ter sido destruída enquanto o worker ainda está ativo!
+    assert destroyed["called"] is False
+
+    # Worker conclui e envia scan_ended
+    app.msg_queue.put(("scan_ended", None))
+    app._check_close_completion()
+
+    # Agora que todas as operações encerraram, a janela foi destruída com segurança
+    assert app.is_scanning is False
+    assert app.op_state == OperationState.CANCELLED
+    assert destroyed["called"] is True
+
+    # Evento tardio chegando após fechamento não deve lançar TclError
+    app.msg_queue.put(("status", "Mensagem tardia pós-fechamento"))
+    app._process_pending_messages()
+
+    # Restaura estado para teardown do fixture
+    app.is_running = True
+    app._closing_requested = False
+    app.closing_requested = False
+
+
 

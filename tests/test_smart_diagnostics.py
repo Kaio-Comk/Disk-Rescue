@@ -233,3 +233,88 @@ def test_smart_interprets_all_extended_attributes_correctly():
     assert any("realocação" in m.lower() for m in rep_196.summary_messages)
 
 
+def test_smart_5_and_197_alone_are_necessary_but_not_sufficient_for_green():
+    """P2/7.2 & 7.5: IDs 5 e 197 = 0 sozinhos sem nenhum atributo complementar retornam UNKNOWN (não GREEN)."""
+    rep = analyze_smart_data(
+        device_id=15,
+        device_path=r"\\.\PhysicalDrive15",
+        model="Minimal SMART Drive",
+        serial="MIN015",
+        raw_attributes={5: 0, 197: 0},  # Apenas 5 e 197 presentes, sem outros atributos nem temperatura
+        temperature_c=None,
+    )
+    assert rep.risk_level == SmartRiskLevel.UNKNOWN
+    assert any("insuficiente" in m.lower() or "isoladamente" in m.lower() for m in rep.summary_messages)
+
+
+def test_smart_combined_crc_and_surface_errors_and_contradictory_combinations():
+    """P2/7.3 & 7.5: Testa falhas simultâneas de CRC (199) + superfície (5/197) e combinações contraditórias."""
+    # 1. CRC (199 > 0) + Superfície (5 > 0, 197 > 0) simultâneos
+    rep_combo = analyze_smart_data(
+        device_id=16,
+        device_path=r"\\.\PhysicalDrive16",
+        model="Combo Fault Drive",
+        serial="CMB016",
+        raw_attributes={5: 12, 197: 4, 199: 85},
+        temperature_c=42,
+    )
+    assert rep_combo.risk_level in (SmartRiskLevel.YELLOW, SmartRiskLevel.RED)
+    assert any("simultaneamente" in h.lower() for h in rep_combo.hipotese_provavel)
+
+    # 2. Combinação contraditória: ID 196 > 0 com ID 5 == 0
+    rep_contra = analyze_smart_data(
+        device_id=17,
+        device_path=r"\\.\PhysicalDrive17",
+        model="Contradictory Drive",
+        serial="CNT017",
+        raw_attributes={5: 0, 196: 3, 197: 0, 199: 0},
+        temperature_c=35,
+    )
+    assert rep_contra.risk_level == SmartRiskLevel.YELLOW
+    assert any("inconsistência" in e.lower() for e in rep_contra.evidencia_observada)
+
+
+def test_smart_normalized_threshold_breach_and_unknown_positive_attributes():
+    """P2/7.2 & 7.5: Testa violação de threshold normalizado (value <= thresh) e atributos desconhecidos > 0."""
+    # 1. Atributo com value <= thresh aciona RED mesmo se raw == 0
+    rep_thresh = analyze_smart_data(
+        device_id=18,
+        device_path=r"\\.\PhysicalDrive18",
+        model="Threshold Breach SSD",
+        serial="THR018",
+        raw_attributes={5: {"raw": 0, "value": 10, "worst": 10, "thresh": 20}, 197: 0, 9: 1000},
+        temperature_c=33,
+    )
+    assert rep_thresh.risk_level == SmartRiskLevel.RED
+    assert any("limiar" in m.lower() or "limite crítico" in m.lower() for m in rep_thresh.summary_messages)
+
+    # 2. Atributo desconhecido positivo impede GREEN (permanece UNKNOWN por cautela)
+    rep_unk_pos = analyze_smart_data(
+        device_id=19,
+        device_path=r"\\.\PhysicalDrive19",
+        model="Vendor Specific Drive",
+        serial="VND019",
+        raw_attributes={5: 0, 197: 0, 9: 200, 245: 7},
+        temperature_c=31,
+    )
+    assert rep_unk_pos.risk_level == SmartRiskLevel.UNKNOWN
+    assert any("245" in m for m in rep_unk_pos.summary_messages)
+
+
+def test_smart_windows_reliability_errors_prevent_false_green():
+    """P2/7.4 & 7.5: Erros reportados pelo Windows impedem GREEN enquanto permanecem segregados dos atributos SMART."""
+    rep_win_err = analyze_smart_data(
+        device_id=20,
+        device_path=r"\\.\PhysicalDrive20",
+        model="Windows Error Reported Drive",
+        serial="WIN020",
+        raw_attributes={1: 0, 5: 0, 197: 0, 198: 0, 199: 0},
+        temperature_c=34,
+        windows_reliability={"ReadErrorsTotal": 4, "WriteErrorsTotal": 1, "Wear": 10},
+    )
+    assert rep_win_err.risk_level == SmartRiskLevel.YELLOW
+    assert len(rep_win_err.attributes) == 5  # Apenas os 5 atributos SMART reais
+    assert any("windows reportou" in m.lower() for m in rep_win_err.summary_messages)
+
+
+

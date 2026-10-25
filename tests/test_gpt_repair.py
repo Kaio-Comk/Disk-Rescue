@@ -382,9 +382,286 @@ def test_repair_gpt_executes_verified_rollback_on_failure(tmp_path, monkeypatch)
     res = repair_gpt_partition_offset(str(img), target_partition_index=2, discovered_fs=fs, backup_dir=backup_dir)
 
     assert res.success is False
+    assert res.rollback_attempted is True
+    assert res.rollback_confirmed is True
+    assert res.final_state_uncertain is False
     assert "Rollback executado com sucesso e verificado" in res.message
     # Garante que os bytes do disco após o rollback voltaram exatamente ao estado original
     assert img.read_bytes() == original_content
+
+
+def _build_full_gpt_disk(
+    total_sectors: int = 2000,
+    num_entries: int = 128,
+    entry_size: int = 128,
+    part_lba: int = 2,
+    first_usable: int = 34,
+    last_usable: int = 1900,
+    backup_lba: int = 1999,
+    backup_entries_lba: int | None = None,
+) -> bytearray:
+    """Cria imagem sintética completa com MBR protetor, GPT primária e GPT de backup válida."""
+    disk = bytearray(total_sectors * 512)
+    # MBR protetor em LBA 0
+    disk[0:8] = b"PROT_MBR"
+    disk[510:512] = b"\x55\xaa"
+
+    entries_bytes_len = num_entries * entry_size
+    entries_sectors = (entries_bytes_len + 511) // 512
+    if backup_entries_lba is None:
+        backup_entries_lba = backup_lba - entries_sectors
+
+    p1 = GPTPartitionEntry(
+        index=1,
+        type_guid=b"\xa2\xa0\xd0\xeb" + b"\x00" * 12,
+        unique_guid=b"\x11" * 16,
+        first_lba=100,
+        last_lba=500,
+        flags=0x0,
+        name="Primary Data",
+    )
+    entries = bytearray(entries_sectors * 512)
+    entries[0:entry_size] = p1.to_bytes(entry_size)
+    part_crc = zlib.crc32(entries[:entries_bytes_len]) & 0xFFFFFFFF
+    disk_guid = b"\xAA" * 16
+
+    # Cabeçalho primário em LBA 1
+    primary_hdr = bytearray(512)
+    struct.pack_into(
+        "<8sIIIIQQQQ16sQIII",
+        primary_hdr, 0,
+        b"EFI PART", 0x00010000, 92, 0, 0,
+        1, backup_lba, first_usable, last_usable,
+        disk_guid, part_lba, num_entries, entry_size, part_crc,
+    )
+    p_crc = zlib.crc32(primary_hdr[:92]) & 0xFFFFFFFF
+    struct.pack_into("<I", primary_hdr, 16, p_crc)
+
+    # Cabeçalho de backup em backup_lba
+    backup_hdr = bytearray(512)
+    struct.pack_into(
+        "<8sIIIIQQQQ16sQIII",
+        backup_hdr, 0,
+        b"EFI PART", 0x00010000, 92, 0, 0,
+        backup_lba, 1, first_usable, last_usable,
+        disk_guid, backup_entries_lba, num_entries, entry_size, part_crc,
+    )
+    b_crc = zlib.crc32(backup_hdr[:92]) & 0xFFFFFFFF
+    struct.pack_into("<I", backup_hdr, 16, b_crc)
+
+    disk[512:1024] = primary_hdr
+    disk[part_lba * 512 : (part_lba + entries_sectors) * 512] = entries
+    disk[backup_entries_lba * 512 : (backup_entries_lba + entries_sectors) * 512] = entries
+    disk[backup_lba * 512 : (backup_lba + 1) * 512] = backup_hdr
+    return disk
+
+
+def test_repair_gpt_custom_entry_size_256_and_nonstandard_table_lbas(tmp_path):
+    """
+    P1/4.1 & 4.4: Testa diferentes quantidades e tamanhos de entradas (32 entradas de 256 bytes = 16 setores)
+    e tabelas primárias (LBA 4) e de backup (LBA 1920, diferente de backup_lba - entries_sectors) válidas.
+    """
+    from core.filesystem.scanner import DiscoveredFilesystem
+    from core.recovery.repair import repair_gpt_partition_offset
+
+    # backup_lba = 1999, entries_sectors = 16, mas backup_entries_lba = 1920 (após last_usable=1900)
+    disk_bytes = _build_full_gpt_disk(
+        total_sectors=2000,
+        num_entries=32,
+        entry_size=256,
+        part_lba=4,
+        first_usable=25,
+        last_usable=1900,
+        backup_lba=1999,
+        backup_entries_lba=1920,
+    )
+    img = tmp_path / "custom_gpt_256.bin"
+    img.write_bytes(disk_bytes)
+    backup_dir = tmp_path / "snaps_256"
+
+    fs = DiscoveredFilesystem("NTFS", start_lba=200, total_sectors=600, size_bytes=600 * 512)
+    res = repair_gpt_partition_offset(str(img), target_partition_index=1, discovered_fs=fs, backup_dir=backup_dir)
+    assert res.success is True
+    assert len(res.region_snapshots) == 5
+
+    # Confirma que a tabela de backup foi gravada no LBA 1920 (e não em 1999 - 16 = 1983)
+    repaired_bytes = img.read_bytes()
+    b_hdr = repaired_bytes[1999 * 512 : 2000 * 512]
+    b_part_lba = struct.unpack_from("<Q", b_hdr, 72)[0]
+    assert b_part_lba == 1920
+    first_lba_in_backup = struct.unpack_from("<Q", repaired_bytes, 1920 * 512 + 32)[0]
+    assert first_lba_in_backup == 200
+
+
+def test_repair_gpt_rejects_bad_crcs_and_inconsistent_backup_header(tmp_path):
+    """P1/4.4: Rejeita reparo quando CRCs primárias/secundárias estão corrompidas ou cabeçalhos divergem."""
+    from core.filesystem.scanner import DiscoveredFilesystem
+    from core.recovery.repair import repair_gpt_partition_offset
+
+    fs = DiscoveredFilesystem("NTFS", start_lba=200, total_sectors=600, size_bytes=600 * 512)
+
+    # 1. CRC do cabeçalho primário inválida
+    d1 = _build_full_gpt_disk()
+    struct.pack_into("<I", d1, 512 + 16, 0xDEADBEEF)
+    img1 = tmp_path / "bad_prim_hcrc.bin"
+    img1.write_bytes(d1)
+    res1 = repair_gpt_partition_offset(str(img1), 1, fs, backup_dir=tmp_path / "b1")
+    assert res1.success is False
+    assert "CRC32 inválido" in res1.message
+
+    # 2. CRC do cabeçalho de backup inválida
+    d2 = _build_full_gpt_disk()
+    struct.pack_into("<I", d2, 1999 * 512 + 16, 0xCAFEBABE)
+    img2 = tmp_path / "bad_back_hcrc.bin"
+    img2.write_bytes(d2)
+    res2 = repair_gpt_partition_offset(str(img2), 1, fs, backup_dir=tmp_path / "b2")
+    assert res2.success is False
+    assert "Cabeçalho GPT de backup com CRC32 inválido" in res2.message
+
+    # 3. Cabeçalho de backup inconsistente (disk_guid divergente do primário, mesmo com CRC recalculada)
+    d3 = _build_full_gpt_disk()
+    d3[1999 * 512 + 56 : 1999 * 512 + 72] = b"\xFF" * 16
+    struct.pack_into("<I", d3, 1999 * 512 + 16, 0)
+    new_bcrc = zlib.crc32(d3[1999 * 512 : 1999 * 512 + 92]) & 0xFFFFFFFF
+    struct.pack_into("<I", d3, 1999 * 512 + 16, new_bcrc)
+    img3 = tmp_path / "inconsistent_back_hdr.bin"
+    img3.write_bytes(d3)
+    res3 = repair_gpt_partition_offset(str(img3), 1, fs, backup_dir=tmp_path / "b3")
+    assert res3.success is False
+    assert "diverge do cabeçalho primário" in res3.message
+
+
+@pytest.mark.parametrize("fail_on_write_step", [1, 2, 3, 4])
+def test_repair_gpt_rollback_on_each_write_step(tmp_path, monkeypatch, fail_on_write_step):
+    """P1/4.4: Testa falha em cada uma das 4 etapas de escrita e comprova rollback integral verificado."""
+    import builtins
+    from core.filesystem.scanner import DiscoveredFilesystem
+    from core.recovery.repair import repair_gpt_partition_offset
+
+    disk_bytes = _build_full_gpt_disk()
+    img = tmp_path / f"step_{fail_on_write_step}_disk.bin"
+    img.write_bytes(disk_bytes)
+    original = img.read_bytes()
+    backup_dir = tmp_path / f"snaps_step_{fail_on_write_step}"
+
+    real_open = builtins.open
+
+    class StepFaultyFile:
+        def __init__(self, target):
+            self._target = target
+            self._writes = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self._target.__exit__(*args)
+
+        def write(self, data):
+            self._writes += 1
+            if self._writes == fail_on_write_step:
+                raise OSError(f"Falha simulada na etapa de escrita #{fail_on_write_step}")
+            return self._target.write(data)
+
+        def __getattr__(self, name):
+            return getattr(self._target, name)
+
+    def mock_open(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        if "r+b" in mode:
+            return StepFaultyFile(f)
+        return f
+
+    monkeypatch.setattr(builtins, "open", mock_open)
+
+    fs = DiscoveredFilesystem("NTFS", start_lba=200, total_sectors=600, size_bytes=600 * 512)
+    res = repair_gpt_partition_offset(str(img), 1, fs, backup_dir=backup_dir)
+    assert res.success is False
+    assert res.rollback_attempted is True
+    assert res.rollback_confirmed is True
+    assert res.final_state_uncertain is False
+    assert img.read_bytes() == original
+
+
+def test_repair_gpt_fsync_failure_and_rollback_uncertainty(tmp_path, monkeypatch):
+    """
+    P1/4.3 & 4.4:
+    1) Falha de fsync durante o reparo aciona rollback verificado;
+    2) Falha de fsync durante o próprio rollback reporta final_state_uncertain=True e rollback_confirmed=False.
+    """
+    import os
+    from core.filesystem.scanner import DiscoveredFilesystem
+    from core.recovery.repair import repair_gpt_partition_offset
+
+    disk_bytes = _build_full_gpt_disk()
+    img = tmp_path / "fsync_gpt_disk.bin"
+    img.write_bytes(disk_bytes)
+    original = img.read_bytes()
+
+    real_fsync = os.fsync
+    fsync_calls = {"count": 0, "fail_mode": "repair_only"}
+
+    def controlled_fsync(fd):
+        fsync_calls["count"] += 1
+        # As primeiras 7 chamadas são os 7 snapshots preventivos (5 regiões + 2 agregados)
+        if fsync_calls["fail_mode"] == "repair_only" and fsync_calls["count"] == 8:
+            raise OSError("Falha de fsync ao persistir tabelas GPT no disco")
+        if fsync_calls["fail_mode"] == "both_repair_and_rollback" and fsync_calls["count"] >= 8:
+            raise OSError("Falha persistente de fsync também durante o rollback")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", controlled_fsync)
+    fs = DiscoveredFilesystem("NTFS", start_lba=200, total_sectors=600, size_bytes=600 * 512)
+
+    # Caso 1: Falha no fsync do reparo, mas fsync do rollback funciona -> rollback confirmado
+    res1 = repair_gpt_partition_offset(str(img), 1, fs, backup_dir=tmp_path / "fsync_b1")
+    assert res1.success is False
+    assert res1.rollback_attempted is True
+    assert res1.rollback_confirmed is True
+    assert res1.final_state_uncertain is False
+    assert img.read_bytes() == original
+
+    # Caso 2: Falha no fsync do reparo E no fsync do rollback -> estado final incerto!
+    fsync_calls["count"] = 0
+    fsync_calls["fail_mode"] = "both_repair_and_rollback"
+    res2 = repair_gpt_partition_offset(str(img), 1, fs, backup_dir=tmp_path / "fsync_b2")
+    assert res2.success is False
+    assert res2.rollback_attempted is True
+    assert res2.rollback_confirmed is False
+    assert res2.final_state_uncertain is True
+    assert "INCERTO" in res2.message
+
+
+def test_repair_gpt_aborts_before_any_disk_write_if_snapshot_corrupted(tmp_path, monkeypatch):
+    """P1/4.2 & 4.4: Confirma que nenhuma gravação no disco ocorre se a validação de qualquer snapshot falhar."""
+    import builtins
+    from core.filesystem.scanner import DiscoveredFilesystem
+    from core.recovery.repair import repair_gpt_partition_offset
+
+    disk_bytes = _build_full_gpt_disk()
+    img = tmp_path / "no_write_disk.bin"
+    img.write_bytes(disk_bytes)
+    original = img.read_bytes()
+
+    disk_opened_rw = {"opened": False}
+    real_open = builtins.open
+
+    def tracking_open(file, mode="r", *args, **kwargs):
+        if str(file) == str(img) and ("r+" in mode or "w" in mode or "a" in mode):
+            disk_opened_rw["opened"] = True
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", tracking_open)
+
+    # Corrompe a releitura do snapshot para falhar a verificação de integridade
+    monkeypatch.setattr(Path, "read_bytes", lambda self: b"CORRUPTED_SNAPSHOT" if "backup_gpt_" in self.name else real_open(self, "rb").read())
+
+    fs = DiscoveredFilesystem("NTFS", start_lba=200, total_sectors=600, size_bytes=600 * 512)
+    res = repair_gpt_partition_offset(str(img), 1, fs, backup_dir=tmp_path / "corrupt_snap_dir")
+    assert res.success is False
+    assert disk_opened_rw["opened"] is False, "O disco jamais pode ser aberto para escrita se o snapshot falhar!"
+    assert real_open(img, "rb").read() == original
+
 
 
 

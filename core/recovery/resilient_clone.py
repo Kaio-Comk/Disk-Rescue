@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -115,9 +116,16 @@ class CloneMap:
             "blocks": [asdict(b) for b in self.blocks]
         }
         map_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = map_path.parent / f".{map_path.name}.{os.getpid()}_{int(time.time() * 1000)}.tmp"
+        fd, tmp_str = tempfile.mkstemp(
+            dir=str(map_path.parent),
+            prefix=f".{map_path.name}.",
+            suffix=".tmp"
+        )
+        tmp_path = Path(tmp_str)
+        fd_closed = False
         try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                fd_closed = True
                 f.write(json.dumps(data, indent=2))
                 f.flush()
                 try:
@@ -128,6 +136,11 @@ class CloneMap:
                     raise OSError(f"Falha de persistência física no mapa: {err}") from err
             os.replace(tmp_path, map_path)
         except Exception:
+            if not fd_closed:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             if tmp_path.exists():
                 try:
                     tmp_path.unlink()
@@ -153,6 +166,14 @@ class CloneMap:
                 return None
             data = json.loads(map_path.read_text(encoding="utf-8"))
 
+            if not isinstance(data, dict):
+                log.warning("Mapa rejeitado: estrutura raiz JSON inválida.")
+                return None
+
+            if "version" in data and str(data.get("version")) != "2.0":
+                log.warning("Mapa rejeitado: versão incompatível (%s).", data.get("version"))
+                return None
+
             if data.get("total_sectors") != expected_sectors:
                 log.warning("Mapa rejeitado: total_sectors incompatível (%s != %s)", data.get("total_sectors"), expected_sectors)
                 return None
@@ -171,23 +192,27 @@ class CloneMap:
                 return None
 
             clean_exp_out = str(expected_output.resolve()).replace("\\", "/").lower()
-            clean_map_out = str(map_out).replace("\\", "/").lower()
+            clean_map_out = str(Path(str(map_out)).resolve()).replace("\\", "/").lower()
             if clean_exp_out != clean_map_out:
                 log.warning("Mapa rejeitado: arquivo de destino diferente (%s != %s)", clean_map_out, clean_exp_out)
                 return None
 
             blocks_raw = data.get("blocks", [])
-            if not blocks_raw:
-                log.warning("Mapa rejeitado: lista de blocos vazia.")
+            if not isinstance(blocks_raw, list) or not blocks_raw:
+                log.warning("Mapa rejeitado: lista de blocos vazia ou malformada.")
                 return None
 
             # Validação rigorosa dos blocos (cobertura total contígua, sem lacunas, contagens > 0)
             blocks = []
             expected_start = 0
             for b in blocks_raw:
+                if not isinstance(b, dict):
+                    return None
                 start = b.get("start_lba", -1)
                 count = b.get("sector_count", 0)
                 status = b.get("status", "")
+                if not isinstance(start, int) or not isinstance(count, int):
+                    return None
                 if count <= 0 or start != expected_start or status not in {"?", "+", "*", "-"}:
                     log.warning("Mapa rejeitado: bloco inconsistente ou com lacuna (%s)", b)
                     return None
@@ -204,14 +229,28 @@ class CloneMap:
                 log.warning("Mapa rejeitado: sector_size incompatível com a implementação (%s != %s)", map_sector_size, SECTOR_SIZE)
                 return None
 
-            # Verificação de coerência com o arquivo físico de imagem
+            # Verificação de consistência interna dos contadores consolidados (quando presentes no JSON)
             rescued_in_map = sum(b.sector_count for b in blocks if b.status == "+")
+            bad_in_map = sum(b.sector_count for b in blocks if b.status == "-")
+            skipped_in_map = sum(b.sector_count for b in blocks if b.status == "*")
+
+            if "rescued_sectors" in data and data["rescued_sectors"] != rescued_in_map:
+                log.warning("Mapa rejeitado: contador 'rescued_sectors' (%s) diverge dos blocos (%d).", data["rescued_sectors"], rescued_in_map)
+                return None
+            if "bad_sectors" in data and data["bad_sectors"] != bad_in_map:
+                log.warning("Mapa rejeitado: contador 'bad_sectors' (%s) diverge dos blocos (%d).", data["bad_sectors"], bad_in_map)
+                return None
+            if "skipped_sectors" in data and data["skipped_sectors"] != skipped_in_map:
+                log.warning("Mapa rejeitado: contador 'skipped_sectors' (%s) diverge dos blocos (%d).", data["skipped_sectors"], skipped_in_map)
+                return None
+
+            # Verificação de coerência com o arquivo físico de imagem
             expected_size = expected_sectors * SECTOR_SIZE
-            if rescued_in_map > 0:
+            if rescued_in_map > 0 or bad_in_map > 0 or skipped_in_map > 0:
                 if not expected_output.exists():
                     log.warning(
-                        "Mapa rejeitado: o mapa indica %d setores recuperados, mas o arquivo de imagem '%s' não existe.",
-                        rescued_in_map, expected_output
+                        "Mapa rejeitado: o mapa indica progresso anterior, mas o arquivo de imagem '%s' não existe.",
+                        expected_output
                     )
                     return None
                 actual_size = expected_output.stat().st_size
@@ -391,138 +430,168 @@ class ResilientCloner:
                 return dev.read(count * SECTOR_SIZE)
 
         read_block = reader_fn or default_reader
+        target_size = self.total_sectors * SECTOR_SIZE
 
-        with open(self.output_image_path, "r+b") as dst_file:
-            # ── FASE 1: PASSAGEM RÁPIDA COM PULO DE BAD SECTORS ──────────────────
-            unread_ranges = self.clone_map.get_unread_ranges()
+        # Snapshot dos blocos já confirmados em disco para rollback do mapa em memória se ocorrer falha de persistência
+        synced_blocks_snapshot = [CloneBlock(b.start_lba, b.sector_count, b.status) for b in self.clone_map.blocks]
+        last_written_sample: Optional[Tuple[int, bytes]] = None
 
-            for range_start, range_count in unread_ranges:
-                if self.cancel_requested:
-                    break
-
-                cur_lba = range_start
-                range_end = range_start + range_count
-
-                while cur_lba < range_end and not self.cancel_requested:
-                    count = min(self.block_sectors, range_end - cur_lba)
-                    try:
-                        data = read_block(cur_lba, count)
-                        if len(data) != count * SECTOR_SIZE:
-                            raise OSError("Leitura incompleta do setor.")
-
-                        # Grava no destino no LBA exato
-                        dst_file.seek(cur_lba * SECTOR_SIZE)
-                        dst_file.write(data)
-
-                        self.clone_map.mark_range(cur_lba, count, "+")
-                        bytes_rescued_in_run += len(data)
-                        cur_lba += count
-
-                    except Exception as exc:
-                        log.warning("Erro de leitura no LBA %d..%d: %s. Pulando...", cur_lba, cur_lba + count, exc)
-                        # Salta para afastar cabeças magnéticas da área degradada
-                        jump = min(self.skip_step_sectors, range_end - cur_lba)
-                        # REGRA CRÍTICA P0: Todos os setores saltados são marcados como '*' (pulados)
-                        # para serem raspados na Fase 2, garantindo zero omissão de dados.
-                        self.clone_map.mark_range(cur_lba, jump, "*")
-                        cur_lba += jump
-
-                    iteration_count += 1
-                    now = time.time()
-                    if now - last_save_time >= 2.0:
-                        dst_file.flush()
-                        try:
-                            if hasattr(dst_file, "fileno"):
-                                os.fsync(dst_file.fileno())
-                        except OSError as err:
-                            log.error("Falha de persistência física na imagem (fsync): %s", err)
-                            raise OSError(f"Falha de sincronização na imagem de destino: {err}") from err
-                        self.clone_map.save_map(self.map_path)
-                        last_save_time = now
-
-                    if progress_cb and (now - last_cb_time >= 0.1 or iteration_count % 3 == 0):
-                        speed = (bytes_rescued_in_run / (1024 * 1024)) / max(0.1, now - t_start)
-                        progress_cb(ResilientCloneStats(
-                            current_sector=cur_lba,
-                            total_sectors=self.total_sectors,
-                            rescued_sectors=self.clone_map.rescued_sectors,
-                            bad_sectors=self.clone_map.bad_sectors,
-                            skipped_sectors=self.clone_map.skipped_sectors,
-                            speed_mb_s=speed,
-                            phase="Fase 1: Passagem Rápida"
-                        ))
-                        last_cb_time = now
-
-            dst_file.flush()
+        def sync_and_checkpoint(dst_f):
+            nonlocal synced_blocks_snapshot, last_written_sample
+            dst_f.flush()
             try:
-                if hasattr(dst_file, "fileno"):
-                    os.fsync(dst_file.fileno())
+                if hasattr(dst_f, "fileno"):
+                    os.fsync(dst_f.fileno())
             except OSError as err:
                 log.error("Falha de persistência física na imagem (fsync): %s", err)
                 raise OSError(f"Falha de sincronização na imagem de destino: {err}") from err
-            self.clone_map.save_map(self.map_path)
 
-            # ── FASE 2: RASPAGEM CIRÚRGICA DE TODOS OS SETORES PULADOS ───────────
-            skipped_ranges = self.clone_map.get_skipped_ranges()
-            if skipped_ranges and not self.cancel_requested:
-                log.info("Iniciando Fase 2 (Raspagem cirúrgica setor a setor)...")
-                for range_start, range_count in skipped_ranges:
+            # Validação incremental por bloco: confirma tamanho da imagem e releitura da última escrita do lote
+            if last_written_sample is not None:
+                sample_offset, sample_bytes = last_written_sample
+                dst_f.seek(sample_offset)
+                verified_bytes = dst_f.read(len(sample_bytes))
+                if verified_bytes != sample_bytes:
+                    raise OSError(
+                        f"Falha de coerência incremental na imagem de destino no offset {sample_offset}: "
+                        "dados lidos divergem dos gravados."
+                    )
+                last_written_sample = None
+
+            dst_f.seek(0, os.SEEK_END)
+            if dst_f.tell() != target_size:
+                raise OSError(
+                    f"Inconsistência no tamanho físico da imagem durante clonagem ({dst_f.tell()} != {target_size} bytes)."
+                )
+
+            self.clone_map.save_map(self.map_path)
+            synced_blocks_snapshot = [CloneBlock(b.start_lba, b.sector_count, b.status) for b in self.clone_map.blocks]
+
+        try:
+            with open(self.output_image_path, "r+b") as dst_file:
+                # ── FASE 1: PASSAGEM RÁPIDA COM PULO DE BAD SECTORS ──────────────────
+                unread_ranges = self.clone_map.get_unread_ranges()
+
+                for range_start, range_count in unread_ranges:
                     if self.cancel_requested:
                         break
 
-                    for single_lba in range(range_start, range_start + range_count):
-                        if self.cancel_requested:
-                            break
-                        try:
-                            data = read_block(single_lba, 1)
-                            if len(data) != SECTOR_SIZE:
-                                raise OSError("Leitura incompleta de setor.")
+                    cur_lba = range_start
+                    range_end = range_start + range_count
 
-                            dst_file.seek(single_lba * SECTOR_SIZE)
-                            dst_file.write(data)
-                            self.clone_map.mark_range(single_lba, 1, "+")
-                            bytes_rescued_in_run += SECTOR_SIZE
-                        except Exception:
-                            # Setor irrecuperável: escreve zeros no offset exato e registra como bad '-'
-                            dst_file.seek(single_lba * SECTOR_SIZE)
-                            dst_file.write(b"\x00" * SECTOR_SIZE)
-                            self.clone_map.mark_range(single_lba, 1, "-")
+                    while cur_lba < range_end and not self.cancel_requested:
+                        count = min(self.block_sectors, range_end - cur_lba)
+                        try:
+                            data = read_block(cur_lba, count)
+                            if len(data) != count * SECTOR_SIZE:
+                                raise OSError("Leitura incompleta do setor.")
+
+                            # Grava no destino no LBA exato
+                            offset = cur_lba * SECTOR_SIZE
+                            dst_file.seek(offset)
+                            written = dst_file.write(data)
+                            if written != len(data):
+                                raise OSError(f"Escrita incompleta na imagem de destino ({written} != {len(data)} bytes).")
+                            last_written_sample = (offset, data)
+
+                            self.clone_map.mark_range(cur_lba, count, "+")
+                            bytes_rescued_in_run += len(data)
+                            cur_lba += count
+
+                        except Exception as exc:
+                            if "Escrita incompleta" in str(exc):
+                                raise
+                            log.warning("Erro de leitura no LBA %d..%d: %s. Pulando...", cur_lba, cur_lba + count, exc)
+                            # Salta para afastar cabeças magnéticas da área degradada
+                            jump = min(self.skip_step_sectors, range_end - cur_lba)
+                            # REGRA CRÍTICA P0: Todos os setores saltados são marcados como '*' (pulados)
+                            # para serem raspados na Fase 2, garantindo zero omissão de dados.
+                            self.clone_map.mark_range(cur_lba, jump, "*")
+                            cur_lba += jump
 
                         iteration_count += 1
                         now = time.time()
                         if now - last_save_time >= 2.0:
-                            dst_file.flush()
-                            try:
-                                if hasattr(dst_file, "fileno"):
-                                    os.fsync(dst_file.fileno())
-                            except OSError as err:
-                                log.error("Falha de persistência física na imagem (fsync): %s", err)
-                                raise OSError(f"Falha de sincronização na imagem de destino: {err}") from err
-                            self.clone_map.save_map(self.map_path)
+                            sync_and_checkpoint(dst_file)
                             last_save_time = now
 
-                        if progress_cb and (now - last_cb_time >= 0.1 or iteration_count % 5 == 0):
+                        if progress_cb and (now - last_cb_time >= 0.1 or iteration_count % 3 == 0):
                             speed = (bytes_rescued_in_run / (1024 * 1024)) / max(0.1, now - t_start)
                             progress_cb(ResilientCloneStats(
-                                current_sector=single_lba,
+                                current_sector=cur_lba,
                                 total_sectors=self.total_sectors,
                                 rescued_sectors=self.clone_map.rescued_sectors,
                                 bad_sectors=self.clone_map.bad_sectors,
                                 skipped_sectors=self.clone_map.skipped_sectors,
                                 speed_mb_s=speed,
-                                phase="Fase 2: Raspagem Cirúrgica"
+                                phase="Fase 1: Passagem Rápida"
                             ))
                             last_cb_time = now
 
-            dst_file.flush()
-            try:
-                if hasattr(dst_file, "fileno"):
-                    os.fsync(dst_file.fileno())
-            except OSError as err:
-                log.error("Falha de persistência física na imagem (fsync): %s", err)
-                raise OSError(f"Falha de sincronização na imagem de destino: {err}") from err
+                sync_and_checkpoint(dst_file)
 
-        self.clone_map.save_map(self.map_path)
+                # ── FASE 2: RASPAGEM CIRÚRGICA DE TODOS OS SETORES PULADOS ───────────
+                skipped_ranges = self.clone_map.get_skipped_ranges()
+                if skipped_ranges and not self.cancel_requested:
+                    log.info("Iniciando Fase 2 (Raspagem cirúrgica setor a setor)...")
+                    for range_start, range_count in skipped_ranges:
+                        if self.cancel_requested:
+                            break
+
+                        for single_lba in range(range_start, range_start + range_count):
+                            if self.cancel_requested:
+                                break
+                            offset = single_lba * SECTOR_SIZE
+                            try:
+                                data = read_block(single_lba, 1)
+                                if len(data) != SECTOR_SIZE:
+                                    raise OSError("Leitura incompleta de setor.")
+
+                                dst_file.seek(offset)
+                                written = dst_file.write(data)
+                                if written != SECTOR_SIZE:
+                                    raise OSError(f"Escrita incompleta na imagem de destino ({written} != {SECTOR_SIZE} bytes).")
+                                last_written_sample = (offset, data)
+                                self.clone_map.mark_range(single_lba, 1, "+")
+                                bytes_rescued_in_run += SECTOR_SIZE
+                            except Exception as exc:
+                                if "Escrita incompleta" in str(exc):
+                                    raise
+                                # Setor irrecuperável: escreve zeros no offset exato e registra como bad '-'
+                                zero_sec = b"\x00" * SECTOR_SIZE
+                                dst_file.seek(offset)
+                                written = dst_file.write(zero_sec)
+                                if written != SECTOR_SIZE:
+                                    raise OSError(f"Escrita incompleta de preenchimento na imagem ({written} != {SECTOR_SIZE} bytes).")
+                                last_written_sample = (offset, zero_sec)
+                                self.clone_map.mark_range(single_lba, 1, "-")
+
+                            iteration_count += 1
+                            now = time.time()
+                            if now - last_save_time >= 2.0:
+                                sync_and_checkpoint(dst_file)
+                                last_save_time = now
+
+                            if progress_cb and (now - last_cb_time >= 0.1 or iteration_count % 5 == 0):
+                                speed = (bytes_rescued_in_run / (1024 * 1024)) / max(0.1, now - t_start)
+                                progress_cb(ResilientCloneStats(
+                                    current_sector=single_lba,
+                                    total_sectors=self.total_sectors,
+                                    rescued_sectors=self.clone_map.rescued_sectors,
+                                    bad_sectors=self.clone_map.bad_sectors,
+                                    skipped_sectors=self.clone_map.skipped_sectors,
+                                    speed_mb_s=speed,
+                                    phase="Fase 2: Raspagem Cirúrgica"
+                                ))
+                                last_cb_time = now
+
+                sync_and_checkpoint(dst_file)
+        except Exception:
+            # Reverte o mapa em memória para o último estado efetivamente sincronizado (fsync) em disco
+            self.clone_map.blocks = synced_blocks_snapshot
+            self.clone_map.recalculate_counts()
+            raise
+
         self.clone_map.recalculate_counts()
 
         success = not self.cancel_requested
