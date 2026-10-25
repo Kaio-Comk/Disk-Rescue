@@ -3,7 +3,7 @@ tests/test_raw_image.py — Testes unitários para create_raw_disk_image com ver
 """
 from pathlib import Path
 import pytest
-from core.recovery.repair import create_raw_disk_image
+from core.recovery.repair import RawImageResult, RawImageStatus, create_raw_disk_image
 
 
 def test_create_raw_disk_image_validates_positive_parameters(tmp_path):
@@ -56,12 +56,15 @@ def test_create_raw_disk_image_detects_incomplete_read(tmp_path):
     dst = tmp_path / "out.img"
 
     # Solicita 10 setores, mas o arquivo só possui 2
-    ok = create_raw_disk_image(str(src), dst, sector_size=512, max_sectors=10)
-    assert ok is False
+    res = create_raw_disk_image(str(src), dst, sector_size=512, max_sectors=10)
+    assert isinstance(res, RawImageResult)
+    assert bool(res) is False
+    assert res.status == RawImageStatus.PARTIAL
+    assert res.sectors_written == 2
 
 
 def test_create_raw_disk_image_success_with_progress_and_cancel(tmp_path):
-    """Valida fluxo de criação íntegra de imagem e suporte a cancelamento."""
+    """Valida fluxo de criação íntegra de imagem, objeto RawImageResult e suporte a cancelamento."""
     src = tmp_path / "valid_src.bin"
     src.write_bytes(b"\x12\x34" * 2048)  # 4096 bytes = 8 setores
     dst = tmp_path / "valid_out.img"
@@ -71,14 +74,18 @@ def test_create_raw_disk_image_success_with_progress_and_cancel(tmp_path):
         progress_records.append((cur, total))
 
     # Cópia completa
-    ok = create_raw_disk_image(str(src), dst, sector_size=512, max_sectors=8, chunk_sectors=2, progress_cb=on_progress)
-    assert ok is True
+    res = create_raw_disk_image(str(src), dst, sector_size=512, max_sectors=8, chunk_sectors=2, progress_cb=on_progress)
+    assert isinstance(res, RawImageResult)
+    assert bool(res) is True
+    assert res.status == RawImageStatus.COMPLETED
+    assert res.sectors_written == 8
+    assert res.bytes_written == 4096
     assert dst.read_bytes() == src.read_bytes()
     assert len(progress_records) > 0
 
     # Cancelamento imediato
     dst_canceled = tmp_path / "canceled.img"
-    ok_cancel = create_raw_disk_image(
+    res_cancel = create_raw_disk_image(
         str(src),
         dst_canceled,
         sector_size=512,
@@ -86,7 +93,10 @@ def test_create_raw_disk_image_success_with_progress_and_cancel(tmp_path):
         chunk_sectors=2,
         cancel_check=lambda: True
     )
-    assert ok_cancel is False
+    assert isinstance(res_cancel, RawImageResult)
+    assert bool(res_cancel) is False
+    assert res_cancel.status == RawImageStatus.CANCELLED
+    assert not dst_canceled.exists()
 
 
 def test_create_raw_disk_image_refuses_overwrite_by_default(tmp_path):
@@ -110,8 +120,10 @@ def test_create_raw_disk_image_allows_overwrite_when_flag_is_true(tmp_path):
     dst = tmp_path / "target_ovw.img"
     dst.write_bytes(b"OLD_CONTENT")
 
-    ok = create_raw_disk_image(str(src), dst, allow_overwrite=True)
-    assert ok is True
+    res = create_raw_disk_image(str(src), dst, allow_overwrite=True)
+    assert isinstance(res, RawImageResult)
+    assert bool(res) is True
+    assert res.status == RawImageStatus.COMPLETED
     assert dst.read_bytes() == src.read_bytes()
 
 
@@ -122,9 +134,31 @@ def test_create_raw_disk_image_rejects_unaligned_sector_reads(tmp_path):
     src.write_bytes(b"\x33" * 700)
     dst = tmp_path / "unaligned_out.img"
 
-    ok = create_raw_disk_image(str(src), dst, sector_size=512)
-    assert ok is False
+    res = create_raw_disk_image(str(src), dst, sector_size=512)
+    assert isinstance(res, RawImageResult)
+    assert bool(res) is False
+    assert res.status == RawImageStatus.READ_ERROR
     assert not dst.exists()
     # Verifica que não ficou nenhum .tmp no diretório
     tmps = list(tmp_path.glob("*.tmp"))
     assert len(tmps) == 0
+
+
+def test_create_raw_disk_image_handles_fsync_failure(tmp_path, monkeypatch):
+    """P1: Trata adequadamente falhas de persistência física (fsync) retornando PERSISTENCE_ERROR."""
+    src = tmp_path / "fsync_src.bin"
+    src.write_bytes(b"\x44" * 1024)
+    dst = tmp_path / "fsync_dst.img"
+
+    def mock_fsync(fd):
+        raise OSError("Falha simulada de hardware no fsync")
+
+    monkeypatch.setattr("os.fsync", mock_fsync)
+
+    res = create_raw_disk_image(str(src), dst, sector_size=512)
+    assert isinstance(res, RawImageResult)
+    assert bool(res) is False
+    assert res.status == RawImageStatus.PERSISTENCE_ERROR
+    assert not dst.exists()
+    assert len(list(tmp_path.glob("*.tmp"))) == 0
+

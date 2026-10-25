@@ -1,7 +1,7 @@
 # 🛠️ DiskRescue
 
 [![Release](https://img.shields.io/github/v/release/Kaio-Comk/Disk-Rescue?color=blue&label=Vers%C3%A3o)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)
-[![Tests](https://img.shields.io/badge/Testes-74%2F74%20Aprovados-success)](https://github.com/Kaio-Comk/Disk-Rescue)
+[![Tests](https://img.shields.io/badge/Testes-80%2F80%20Aprovados-success)](https://github.com/Kaio-Comk/Disk-Rescue)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-blue?logo=python)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Plataforma-Windows%2011%20Fluent-0078d4?logo=windows)](https://github.com/Kaio-Comk/Disk-Rescue)
 [![License](https://img.shields.io/badge/Licen%C3%A7a-MIT-green)](LICENSE)
@@ -17,12 +17,12 @@ A aplicação conta com uma interface desktop moderna no padrão **Windows 11 Fl
 ## ⚡ Download Imediato do Executável
 
 Baixe a versão mais recente pronta para uso:
-👉 **[Baixar DiskRescue v0.3.1 (Executável Portátil)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)**
+👉 **[Baixar DiskRescue v0.3.2 (Executável Portátil)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)**
 
 * **Portátil e Autônomo:** Não requer instalação de Python nem dependências externas (~31.2 MB).
 * **Integridade Criptográfica (SHA-256):**
   ```text
-  AD7C356C1D5E66CCE455E68804F386EEF4040C3CF266899280EBB8C3002574F7
+  32CC51C4437CA781F006A6670C42CE1356C79CF1127BCF39E7FA3B606C4F567C
   ```
 * **Elevação UAC Automática:** Manifest embutido solicita privilégios de Administrador ao iniciar, garantindo acesso direto de baixo nível (`\\.\PhysicalDriveX`).
 * **Identidade Visual Nativa:** Ícone `.ico` oficial embutido no executável (resoluções de 16x16 a 256x256).
@@ -109,15 +109,15 @@ flowchart TD
 
 ## 🗂️ Os 7 Módulos da Interface Gráfica (Windows 11 Fluent)
 
-A versão `v0.3.1` consolida correções críticas de segurança, restauração cirúrgica de Boot Sector NTFS via backup, thread safety na GUI e validação em CI:
+A versão `v0.3.2` consolida auditoria corretiva com segurança aprofundada de dados, dual snapshot dinâmico e rollback verificado em GPT, restauração cirúrgica de Boot Sector NTFS com verificação preventiva, thread-safety com estados operacionais explícitos (`OperationState`), cancelamento cooperativo de carver e telemetria SMART estendida:
 
 | Módulo | Descrição & Capacidades |
 |---|---|
 | **📊 Visão Geral (Dashboard)** | Painel executivo consolidado com badge de confiabilidade, diretriz técnica recomendada, atalhos rápidos e inventário de partições detectadas. |
-| **🔍 Diagnóstico & Partições** | Inspeção comparativa lado a lado entre a tabela oficial (GPT/MBR) e boot sectors reais na mídia física. Diagnóstico de desalinhamento e restauração de VBR com backup preventivo. |
-| **📈 Telemetria S.M.A.R.T.** | 6 cards visuais de telemetria ATA, isolamento contextual de cabo SATA com ruído elétrico (ID C7), temperatura e honestidade técnica (indicadores "N/D" em controladoras USB sem pass-through). |
-| **💾 Clonagem Resiliente** | Motor de resgate em duas fases (Fast Pass + Scraping fino), barra de progresso em tempo real, métricas de velocidade (MB/s), setores resgatados vs bad sectors e persistência em arquivo de mapa `.map`. |
-| **🔬 File Carving Forense** | Recuperação por assinaturas mágicas (JPG, PNG, PDF, ZIP, DOCX) diretamente de setores brutos com streaming em disco (spooling), filtros de extensão e botão de abertura da pasta recuperada. |
+| **🔍 Diagnóstico & Partições** | Inspeção comparativa lado a lado entre a tabela oficial (GPT/MBR) e boot sectors reais na mídia física. Diagnóstico de desalinhamento, realinhamento dinâmico GPT e restauração cirúrgica de VBR com backup preventivo. |
+| **📈 Telemetria S.M.A.R.T.** | 6 cards visuais de telemetria ATA, isolamento contextual de cabo SATA com ruído elétrico (ID C7), temperatura, avaliação de atributos estendidos (IDs 184, 187, 188, 196) e honestidade técnica sobre barramento USB. |
+| **💾 Clonagem Resiliente** | Motor de resgate em duas fases (Fast Pass + Scraping fino), barra de progresso em tempo real, métricas de velocidade (MB/s), setores resgatados vs bad sectors e persistência atômica em arquivo de mapa `.map`. |
+| **🔬 File Carving Forense** | Recuperação por assinaturas mágicas (JPG, PNG, PDF, ZIP, DOCX) diretamente de setores brutos com streaming em disco (spooling), filtros de extensão, botão de cancelamento cooperativo e abertura rápida da pasta. |
 | **⚡ Varredura de Superfície** | Grade de blocos interativa com mapa de calor de latência de leitura (estilo MHDD / Victoria), medindo tempos de resposta (< 20ms até Atraso Crítico e Bad Sector). |
 | **📝 Console de Logs** | Terminal integrado de auditoria em tempo real, com timestamp detalhado e exportação de relatórios em `.txt`. |
 
@@ -130,17 +130,17 @@ O DiskRescue foi concebido com foco absoluto na integridade física e preservaç
 2. **Bloqueio P0 Fail-Closed Universal de Disco Físico (Device Resolver):** Resolução profunda de hardware via `IOCTL_STORAGE_GET_DEVICE_NUMBER` com protótipos Win32 64-bit explícitos (`ctypes.wintypes.HANDLE`), suportando letras de unidade, dispositivos `PhysicalDriveN` e caminhos de Volume GUID (`\\?\Volume{...}`). Adota política Fail-Closed universal: se a identidade física de origem ou destino não puder ser comprovada como independente, a operação é bloqueada preventivamente.
 3. **Proteção de Integridade do Mapa (`map_path`):** O arquivo de mapa é protegido contra colisão com a própria imagem de saída (evitando sobrescrita acidental) e impedido de ser gravado no disco físico de origem.
 4. **Validação de Imagem na Retomada (Resume):** Rejeita retomar clonagens quando o arquivo físico de imagem em disco estiver ausente ou truncado em relação ao tamanho total esperado dos setores.
-5. **Snapshots Preventivos Obrigatórios e Rollback Verificado:** Nenhuma gravação de setor físico é executada sem que cópias binárias exatas das regiões originais (tanto primária quanto de backup) sejam gravadas e verificadas no disco local (`backup_gpt_primary_*.bin`, `backup_gpt_secondary_*.bin`, `corrupted_vbr_*.bin`), com rollback atômico em caso de falha.
-6. **Gravação Atômica de Imagens com Proteção contra Sobrescrita:** `create_raw_disk_image()` rejeita arquivos existentes por padrão (`allow_overwrite=False`), grava em arquivo temporário isolado (`.tmp`), sincroniza via `fsync` e substitui atomicamente via `os.replace`.
-7. **Thread Safety Estrita na GUI:** Todas as alterações de componentes visuais, diálogos modais e atualizações de estado ocorrem estritamente na thread principal via fila thread-safe (`msg_queue`) e poller de eventos assíncrono.
+5. **Snapshots Preventivos Obrigatórios e Rollback Verificado:** Nenhuma gravação de setor físico é executada sem que cópias binárias exatas das regiões originais (tanto primária quanto de backup, calculadas dinamicamente sem limite arbitrário de setores) sejam gravadas e relidas preventivamente do disco local (`backup_gpt_primary_*.bin`, `backup_gpt_secondary_*.bin`, `corrupted_vbr_*.bin`), com rollback atômico e verificação pós-restauração.
+6. **Gravação Atômica de Imagens com Staging Exclusivo e Status Detalhado:** `create_raw_disk_image()` rejeita arquivos existentes por padrão (`allow_overwrite=False`), grava via `tempfile.mkstemp` em arquivo temporário isolado (`.tmp`), valida alinhamento estrito de setores, sincroniza via `fsync`, substitui atomicamente via `os.replace` e retorna objeto explícito `RawImageResult`.
+7. **Thread Safety Estrita na GUI e Estados Operacionais:** Todas as alterações de componentes visuais, diálogos modais e atualizações de estado ocorrem estritamente na thread principal via fila thread-safe (`msg_queue`) e poller de eventos assíncrono. Estados operacionais explícitos (`OperationState`) e cancelamento cooperativo no File Carver garantem confiabilidade.
 8. **Validação Estrutural Profunda Pós-Carving:** Verificação pós-extração com cálculo real de CRC32 em chunks PNG, validação de marcadores e dimensões SOF em JPEG, verificação de offset `startxref` em PDF e `zipfile.testzip()` em arquivos compactados. Falsos positivos são descartados ou isolados.
-9. **Cancelamento Gracioso:** Todas as threads de clonagem, varredura de superfície e carving respondem a sinais de interrupção imediata preservando o progresso salvo.
+9. **Cancelamento Gracioso e Interrupção Segura:** Todas as threads de clonagem, varredura de superfície e carving respondem a sinais de interrupção imediata preservando o progresso salvo e confirmando o encerramento no fechamento da aplicação (`WM_DELETE_WINDOW`).
 
 ---
 
 ## 🧪 Cobertura de Testes Automatizados
 
-O sistema conta com suíte completa de **74 testes unitários e de integração de interface** automatizados:
+O sistema conta com suíte completa de **80 testes unitários e de integração de interface** automatizados:
 
 ```bash
 $ pytest tests/ -v

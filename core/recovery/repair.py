@@ -6,8 +6,10 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from core.filesystem.scanner import DiscoveredFilesystem
@@ -18,9 +20,33 @@ from core.partition.gpt import (
     create_lba_snapshot,
     parse_gpt,
     rebuild_gpt,
+    rebuild_backup_gpt,
 )
 
 log = logging.getLogger("diskrescue.repair")
+
+
+class RawImageStatus(Enum):
+    COMPLETED = "COMPLETED"
+    PARTIAL = "PARTIAL"
+    CANCELLED = "CANCELLED"
+    READ_ERROR = "READ_ERROR"
+    WRITE_ERROR = "WRITE_ERROR"
+    PERSISTENCE_ERROR = "PERSISTENCE_ERROR"
+    REPLACE_ERROR = "REPLACE_ERROR"
+
+
+@dataclass
+class RawImageResult:
+    status: RawImageStatus
+    sectors_written: int = 0
+    bytes_written: int = 0
+    total_sectors: int | None = None
+    target_path: Path | None = None
+    message: str = ""
+
+    def __bool__(self) -> bool:
+        return self.status == RawImageStatus.COMPLETED
 
 
 @dataclass
@@ -103,7 +129,6 @@ def repair_gpt_partition_offset(
             entries_sectors = (entries_bytes_len + sector_size - 1) // sector_size
             primary_total_sectors = gpt.partition_entries_lba + entries_sectors
 
-            from core.partition.gpt import rebuild_backup_gpt
             bkp_header_bytes, bkp_entries_bytes, bkp_entries_lba = rebuild_backup_gpt(gpt, gpt.partitions, sector_size=sector_size)
 
             # Snapshot primário (LBA 0 até fim das entradas primárias)
@@ -254,7 +279,7 @@ def create_raw_disk_image(
     allow_overwrite: bool = False,
     progress_cb=None,
     cancel_check=None
-) -> bool:
+) -> RawImageResult:
     """Cria uma imagem binária setor a setor da mídia física para análise forense segura."""
     if sector_size <= 0:
         raise ValueError("sector_size deve ser estritamente positivo.")
@@ -289,11 +314,25 @@ def create_raw_disk_image(
     # 3. Criação do diretório pai somente após validação segura
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # 4. Arquivo temporário isolado para escrita intermediária atômica
-    temp_output_path = output_path.with_name(f".{output_path.name}.{os.getpid()}_{int(time.time() * 1000)}.tmp")
+    # 4. Arquivo temporário isolado e exclusivo via tempfile.mkstemp
+    fd, temp_str = tempfile.mkstemp(
+        dir=str(output_path.parent),
+        prefix=f".{output_path.stem}_",
+        suffix=".tmp"
+    )
+    temp_output_path = Path(temp_str)
     try:
         assert_safe_source_and_destination(device_path, temp_output_path, is_directory=False)
     except Exception as exc:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        if temp_output_path.exists():
+            try:
+                temp_output_path.unlink()
+            except OSError:
+                pass
         log.error("Bloqueio de segurança no arquivo temporário: %s", exc)
         raise ValueError(f"Destino temporário inseguro: {exc}") from exc
 
@@ -302,9 +341,17 @@ def create_raw_disk_image(
     t_start = time.time()
     last_cb_time = t_start
     bytes_transferred = 0
-    success = False
+    result: RawImageResult | None = None
+    fd_closed = False
 
     def cleanup_temp():
+        nonlocal fd_closed
+        if not fd_closed:
+            try:
+                os.close(fd)
+                fd_closed = True
+            except OSError:
+                pass
         try:
             if temp_output_path.exists():
                 temp_output_path.unlink()
@@ -312,11 +359,20 @@ def create_raw_disk_image(
             log.warning("Falha ao remover arquivo temporário %s: %s", temp_output_path, e)
 
     try:
-        with open(device_path, "rb") as src, open(temp_output_path, "wb") as dst:
+        with open(device_path, "rb") as src, os.fdopen(fd, "wb") as dst:
+            fd_closed = True
             while True:
                 if cancel_check and cancel_check():
                     log.info("Cópia de imagem cancelada pelo usuário.")
-                    return False
+                    result = RawImageResult(
+                        status=RawImageStatus.CANCELLED,
+                        sectors_written=current_sector,
+                        bytes_written=bytes_transferred,
+                        total_sectors=max_sectors,
+                        target_path=output_path,
+                        message="Cópia de imagem cancelada pelo usuário."
+                    )
+                    return result
 
                 if max_sectors and current_sector >= max_sectors:
                     break
@@ -327,20 +383,62 @@ def create_raw_disk_image(
                     if remaining_sectors < chunk_sectors:
                         to_read = remaining_sectors * sector_size
 
-                buf = src.read(to_read)
+                try:
+                    buf = src.read(to_read)
+                except Exception as read_err:
+                    log.error("Erro ao ler da mídia de origem: %s", read_err)
+                    result = RawImageResult(
+                        status=RawImageStatus.READ_ERROR,
+                        sectors_written=current_sector,
+                        bytes_written=bytes_transferred,
+                        total_sectors=max_sectors,
+                        target_path=output_path,
+                        message=f"Erro de leitura da mídia de origem: {read_err}"
+                    )
+                    return result
+
                 if not buf:
                     # Se max_sectors era esperado mas EOF ocorreu antes, a imagem ficou incompleta
                     if max_sectors and current_sector < max_sectors:
                         log.error("Fim prematuro da origem: lidos %d setores de %d esperados.", current_sector, max_sectors)
-                        return False
+                        result = RawImageResult(
+                            status=RawImageStatus.PARTIAL,
+                            sectors_written=current_sector,
+                            bytes_written=bytes_transferred,
+                            total_sectors=max_sectors,
+                            target_path=output_path,
+                            message=f"Fim prematuro da mídia de origem: transferidos {current_sector} de {max_sectors} setores."
+                        )
+                        return result
                     break
 
                 # Verificação estrita de alinhamento de setor na leitura parcial
                 if len(buf) % sector_size != 0:
                     log.error("Leitura parcial desalinhada: lidos %d bytes (não múltiplo de %d).", len(buf), sector_size)
-                    return False
+                    result = RawImageResult(
+                        status=RawImageStatus.READ_ERROR,
+                        sectors_written=current_sector,
+                        bytes_written=bytes_transferred,
+                        total_sectors=max_sectors,
+                        target_path=output_path,
+                        message=f"Leitura desalinhada: lidos {len(buf)} bytes, não múltiplo do setor ({sector_size})."
+                    )
+                    return result
 
-                dst.write(buf)
+                try:
+                    dst.write(buf)
+                except Exception as write_err:
+                    log.error("Erro ao gravar imagem temporária: %s", write_err)
+                    result = RawImageResult(
+                        status=RawImageStatus.WRITE_ERROR,
+                        sectors_written=current_sector,
+                        bytes_written=bytes_transferred,
+                        total_sectors=max_sectors,
+                        target_path=output_path,
+                        message=f"Erro de gravação no arquivo temporário: {write_err}"
+                    )
+                    return result
+
                 sectors_read = len(buf) // sector_size
                 current_sector += sectors_read
                 bytes_transferred += len(buf)
@@ -357,25 +455,69 @@ def create_raw_disk_image(
                 os.fsync(dst.fileno())
             except OSError as err:
                 log.error("Falha ao sincronizar durabilidade da imagem (fsync): %s", err)
-                return False
+                result = RawImageResult(
+                    status=RawImageStatus.PERSISTENCE_ERROR,
+                    sectors_written=current_sector,
+                    bytes_written=bytes_transferred,
+                    total_sectors=max_sectors,
+                    target_path=output_path,
+                    message=f"Falha de sincronização física (fsync): {err}"
+                )
+                return result
 
         if max_sectors and current_sector < max_sectors:
             log.error("Cópia incompleta: apenas %d setores transferidos de %d.", current_sector, max_sectors)
-            return False
+            result = RawImageResult(
+                status=RawImageStatus.PARTIAL,
+                sectors_written=current_sector,
+                bytes_written=bytes_transferred,
+                total_sectors=max_sectors,
+                target_path=output_path,
+                message=f"Cópia incompleta: transferidos {current_sector} de {max_sectors} setores."
+            )
+            return result
 
         # Substituição atômica somente após fsync comprovado e validação total
-        os.replace(temp_output_path, output_path)
-        success = True
+        try:
+            os.replace(temp_output_path, output_path)
+        except Exception as rep_err:
+            log.error("Falha ao mover arquivo temporário para destino final: %s", rep_err)
+            result = RawImageResult(
+                status=RawImageStatus.REPLACE_ERROR,
+                sectors_written=current_sector,
+                bytes_written=bytes_transferred,
+                total_sectors=max_sectors,
+                target_path=output_path,
+                message=f"Falha ao mover arquivo temporário para destino final: {rep_err}"
+            )
+            return result
 
         if progress_cb:
             now = time.time()
             speed = (bytes_transferred / (1024 * 1024)) / max(0.1, now - t_start)
             progress_cb(current_sector, max_sectors or current_sector, speed)
-        return True
+
+        result = RawImageResult(
+            status=RawImageStatus.COMPLETED,
+            sectors_written=current_sector,
+            bytes_written=bytes_transferred,
+            total_sectors=max_sectors,
+            target_path=output_path,
+            message="Imagem forense criada com sucesso."
+        )
+        return result
     except Exception as exc:
-        log.error("Erro ao criar imagem forense: %s", exc)
-        return False
+        log.error("Erro inesperado ao criar imagem forense: %s", exc)
+        result = RawImageResult(
+            status=RawImageStatus.WRITE_ERROR,
+            sectors_written=current_sector,
+            bytes_written=bytes_transferred,
+            total_sectors=max_sectors,
+            target_path=output_path,
+            message=f"Erro inesperado durante a operação: {exc}"
+        )
+        return result
     finally:
-        if not success:
+        if result is None or result.status != RawImageStatus.COMPLETED:
             cleanup_temp()
 

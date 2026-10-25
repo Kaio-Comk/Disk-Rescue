@@ -115,17 +115,25 @@ class CloneMap:
             "blocks": [asdict(b) for b in self.blocks]
         }
         map_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = map_path.parent / f".{map_path.name}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(data, indent=2))
-            f.flush()
-            try:
-                if hasattr(f, "fileno"):
-                    os.fsync(f.fileno())
-            except OSError as err:
-                log.error("Falha ao sincronizar mapa no disco (fsync): %s", err)
-                raise OSError(f"Falha de persistência física no mapa: {err}") from err
-        os.replace(tmp_path, map_path)
+        tmp_path = map_path.parent / f".{map_path.name}.{os.getpid()}_{int(time.time() * 1000)}.tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, indent=2))
+                f.flush()
+                try:
+                    if hasattr(f, "fileno"):
+                        os.fsync(f.fileno())
+                except OSError as err:
+                    log.error("Falha ao sincronizar mapa no disco (fsync): %s", err)
+                    raise OSError(f"Falha de persistência física no mapa: {err}") from err
+            os.replace(tmp_path, map_path)
+        except Exception:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+            raise
 
     @classmethod
     def load_map(

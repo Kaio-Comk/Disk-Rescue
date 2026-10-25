@@ -130,7 +130,7 @@ def restore_ntfs_boot_from_backup(
 
     backup_dir.mkdir(parents=True, exist_ok=True)
 
-    clean_name = device_path.replace("\\", "_").replace(".", "").replace("/", "_").strip("_")
+    clean_name = device_path.replace("\\", "_").replace("/", "_").replace(":", "").replace(".", "").strip("_")[-30:]
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     snapshot_path = backup_dir / f"corrupted_vbr_{clean_name}_{timestamp}.bin"
 
@@ -143,6 +143,10 @@ def restore_ntfs_boot_from_backup(
                 return BootRepairResult(success=False, message="Leitura incompleta do setor primário para snapshot.")
             snapshot_path.write_bytes(corrupted_data)
 
+            # Verificação pós-criação do snapshot antes de qualquer escrita
+            if snapshot_path.read_bytes() != corrupted_data:
+                return BootRepairResult(success=False, message="Verificação de integridade do snapshot de boot falhou.")
+
             # 2. Ler o setor de backup
             f.seek(diag.backup_lba * sector_size)
             valid_vbr = f.read(sector_size)
@@ -150,21 +154,54 @@ def restore_ntfs_boot_from_backup(
             if len(valid_vbr) != sector_size or valid_vbr[3:7] != b"NTFS":
                 return BootRepairResult(success=False, message="Setor de backup inconsistente na leitura.")
 
-            # 3. Gravar o setor válido no setor primário
-            f.seek(diag.primary_lba * sector_size)
-            f.write(valid_vbr)
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except OSError as err:
-                log.error("Falha ao sincronizar Boot Sector NTFS gravado (fsync): %s", err)
-                raise OSError(f"Falha de sincronização física: {err}") from err
+            def do_rollback():
+                log.warning("Iniciando rollback do setor de boot primário...")
+                try:
+                    f.seek(diag.primary_lba * sector_size)
+                    f.write(corrupted_data)
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except OSError:
+                        pass
+                    f.seek(diag.primary_lba * sector_size)
+                    rb_data = f.read(sector_size)
+                    return rb_data == corrupted_data
+                except Exception as rb_exc:
+                    log.error("Exceção durante rollback do setor de boot: %s", rb_exc)
+                    return False
 
-            # Verificação pós-escrita imediata
-            f.seek(diag.primary_lba * sector_size)
-            verified = f.read(sector_size)
-            if verified != valid_vbr:
-                raise OSError("Verificação pós-escrita falhou: o Boot Sector gravado diverge do backup.")
+            # 3. Gravar o setor válido no setor primário com verificação e rollback
+            try:
+                f.seek(diag.primary_lba * sector_size)
+                f.write(valid_vbr)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError as err:
+                    log.error("Falha ao sincronizar Boot Sector NTFS gravado (fsync): %s", err)
+                    raise OSError(f"Falha de sincronização física: {err}") from err
+
+                # Verificação pós-escrita imediata
+                f.seek(diag.primary_lba * sector_size)
+                verified = f.read(sector_size)
+                if verified != valid_vbr:
+                    raise OSError("Verificação pós-escrita falhou: o Boot Sector gravado diverge do backup.")
+            except Exception as write_err:
+                log.error("Falha na gravação ou verificação do Boot Sector: %s", write_err)
+                rb_ok = do_rollback()
+                if rb_ok:
+                    return BootRepairResult(
+                        success=False,
+                        message=f"Falha na gravação/verificação ({write_err}). Rollback executado com sucesso e verificado.",
+                        backup_file=snapshot_path
+                    )
+                else:
+                    return BootRepairResult(
+                        success=False,
+                        message=f"FALHA CRÍTICA: Gravação falhou ({write_err}) e rollback falhou na verificação. Restaure manualmente a partir de {snapshot_path}.",
+                        backup_file=snapshot_path
+                    )
 
         log.info("Boot sector primário NTFS restaurado com sucesso a partir do backup LBA %d", diag.backup_lba)
 

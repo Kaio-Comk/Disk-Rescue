@@ -55,6 +55,6 @@ jobs:
       if: matrix.python-version == '3.12'
       uses: actions/upload-artifact@v4
       with:
-        name: DiskRescue-Portable-v0.3.1
+        name: DiskRescue-Portable-v0.3.2
         path: dist\DiskRescue.exe
         if-no-files-found: error

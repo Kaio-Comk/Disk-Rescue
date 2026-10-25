@@ -65,6 +65,7 @@ SMART_DEFINITIONS = {
     10: ("Spin Retry Count", "Tentativas repetidas de alcançar rotação do motor"),
     184: ("End-to-End Error", "Erros de paridade entre buffer de memória e controladora"),
     187: ("Reported Uncorrectable", "Erros não corrigidos por código ECC"),
+    188: ("Command Timeout", "Comandos abortados por timeout na comunicação com a controladora"),
     196: ("Reallocation Event Count", "Eventos em que o firmware realizou remapeamento"),
     197: ("Current Pending Sector", "Bad sectors instáveis aguardando reescrita para remapeamento"),
     198: ("Offline Uncorrectable", "Setores irrecuperáveis detectados em varredura offline"),
@@ -156,6 +157,11 @@ def analyze_smart_data(
     crc_err = raw_attributes.get(199, None)
     spin_retry = raw_attributes.get(10, None)
     power_hours = raw_attributes.get(9, None)
+    end_to_end = raw_attributes.get(184, None)
+    reported_uncorr = raw_attributes.get(187, None)
+    command_timeout = raw_attributes.get(188, None)
+    realloc_events = raw_attributes.get(196, None)
+    raw_read_err = raw_attributes.get(1, None)
 
     attributes: Dict[int, SmartAttribute] = {}
     for aid, raw_val in raw_attributes.items():
@@ -190,6 +196,47 @@ def analyze_smart_data(
 
     is_red = False
     is_yellow = False
+
+    # Regra: Erros End-to-End na controladora/buffer interno (ID 184)
+    if end_to_end is not None and end_to_end > 0:
+        is_red = True
+        evidencias.append(f"Erros de buffer/controladora End-to-End (ID 184): {end_to_end} erros registrados.")
+        hipoteses.append("Corrupção no caminho de dados interno entre a memória cache do disco e a interface da controladora.")
+        messages.append(
+            f"🚨 FALHA DE BUFFER END-TO-END: {end_to_end} erros no ID 184. "
+            "Risco iminente de corrupção silenciosa de dados em trânsito."
+        )
+
+    # Regra: Erros não corrigidos por ECC reportados pelo hardware (ID 187)
+    if reported_uncorr is not None and reported_uncorr > 0:
+        is_red = True
+        evidencias.append(f"Setores não corrigidos por código ECC (ID 187): {reported_uncorr} setores reportados.")
+        hipoteses.append("Setores com corrupção magnética severa que excederam a capacidade de correção de erros do hardware (ECC).")
+        messages.append(
+            f"🚨 ERROS NÃO CORRIGIDOS POR ECC: {reported_uncorr} leituras falharam sem possibilidade de correção por hardware (ID 187)."
+        )
+
+    # Regra: Comandos abortados por timeout (ID 188)
+    if command_timeout is not None and command_timeout > 0:
+        is_yellow = True
+        evidencias.append(f"Comandos abortados por tempo limite / Timeout (ID 188): {command_timeout} ocorrências.")
+        hipoteses.append("Instabilidade no fornecimento de energia elétrica, congelamento temporário do firmware ou travamento de comandos.")
+        messages.append(
+            f"⚠️ TIMEOUT DE COMANDOS (ID 188): {command_timeout} operações com a controladora foram abortadas por expiração de tempo limite."
+        )
+
+    # Regra: Eventos de realocação executados pelo firmware (ID 196)
+    if realloc_events is not None and realloc_events > 0:
+        evidencias.append(f"Eventos de realocação executados pelo firmware (ID 196): {realloc_events} ocorrências.")
+        if realloc_events > 15:
+            is_red = True
+            hipoteses.append("Múltiplos ciclos sucessivos de realocação de bad sectors pelo firmware do disco.")
+        else:
+            is_yellow = True
+            hipoteses.append("Tentativas prévias de remapeamento de blocos defeituosos registradas pelo firmware.")
+        messages.append(
+            f"⚠️ EVENTOS DE REALOCAÇÃO (ID 196): O firmware realizou {realloc_events} operações de remapeamento de setores."
+        )
 
     # Regra 3: Fadiga Mecânica no Motor
     if spin_val > 0:
@@ -239,10 +286,17 @@ def analyze_smart_data(
 
     # Determinação rigorosa do nível de risco:
     # Para ser VERDE, a telemetria DEVE ter monitorado e confirmado ausência de defeito
-    # tanto em setores remapeados (ID 5) quanto em setores pendentes (ID 197).
+    # tanto em setores remapeados (ID 5) quanto em setores pendentes (ID 197),
+    # E nenhum outro contador crítico deve apresentar erros.
+    critical_counters = [5, 10, 184, 187, 188, 196, 197, 198, 199]
+    has_any_critical_errors = any((raw_attributes.get(k) or 0) > 0 for k in critical_counters)
+
     has_sufficient_health_evidence = (
         (5 in raw_attributes and raw_attributes[5] == 0) and
-        (197 in raw_attributes and raw_attributes[197] == 0)
+        (197 in raw_attributes and raw_attributes[197] == 0) and
+        not has_any_critical_errors and
+        not is_red and
+        not is_yellow
     )
 
     if is_red:

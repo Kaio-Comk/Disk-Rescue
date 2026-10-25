@@ -304,5 +304,29 @@ def test_gui_queue_poller_thread_safe_message_handlers(mock_gui):
     assert str(app.btn_start_clone.cget("state")) == "normal"
     assert str(app.btn_cancel_clone.cget("state")) == "disabled"
     assert str(app.btn_start_carve.cget("state")) == "normal"
+    assert str(app.btn_cancel_carve.cget("state")) == "disabled"
     assert str(app.btn_start_surface.cget("state")) == "normal"
     assert str(app.btn_cancel_surface.cget("state")) == "disabled"
+
+
+def test_gui_operation_states_and_scan_ended_recovery(mock_gui):
+    """P1 Teste: Valida transição de OperationState e restabelecimento de varredura via fila."""
+    from gui.app import OperationState
+    app, root = mock_gui
+
+    assert app.op_state == OperationState.IDLE
+
+    # Simula início de varredura
+    app.is_scanning = True
+    app.op_state = OperationState.RUNNING
+    app.btn_run_scan.config(state=tk.DISABLED)
+
+    # Enfileira scan_ended
+    app.msg_queue.put(("scan_ended", None))
+    app._start_queue_poller()
+    root.update()
+
+    assert app.is_scanning is False
+    assert app.op_state == OperationState.IDLE
+    assert str(app.btn_run_scan.cget("state")) == "normal"
+

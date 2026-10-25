@@ -181,3 +181,55 @@ def test_smart_usb_vs_non_usb_unknown_differentiation():
     assert "controladora de disco" in rep_sata.action_recommendation.lower()
     assert "usb" not in rep_sata.action_recommendation.lower()
 
+
+def test_smart_interprets_all_extended_attributes_correctly():
+    """P1 Teste: Valida que IDs 184, 187, 188 e 196 são interpretados e elevam risco conforme o rigor técnico."""
+    # 1. ID 184 (End-to-End Error) eleva para RED
+    rep_184 = analyze_smart_data(
+        device_id=11,
+        device_path=r"\\.\PhysicalDrive11",
+        model="Server Enterprise SSD",
+        serial="SRV001",
+        raw_attributes={5: 0, 197: 0, 184: 3},
+        temperature_c=36
+    )
+    assert rep_184.risk_level == SmartRiskLevel.RED
+    assert any("end-to-end" in m.lower() for m in rep_184.summary_messages)
+
+    # 2. ID 187 (Reported Uncorrectable) eleva para RED
+    rep_187 = analyze_smart_data(
+        device_id=12,
+        device_path=r"\\.\PhysicalDrive12",
+        model="Seagate Enterprise",
+        serial="SEA002",
+        raw_attributes={5: 0, 197: 0, 187: 7},
+        temperature_c=39
+    )
+    assert rep_187.risk_level == SmartRiskLevel.RED
+    assert any("ecc" in m.lower() for m in rep_187.summary_messages)
+
+    # 3. ID 188 (Command Timeout) eleva para YELLOW
+    rep_188 = analyze_smart_data(
+        device_id=13,
+        device_path=r"\\.\PhysicalDrive13",
+        model="WD Red NAS",
+        serial="WDR003",
+        raw_attributes={5: 0, 197: 0, 188: 4},
+        temperature_c=34
+    )
+    assert rep_188.risk_level == SmartRiskLevel.YELLOW
+    assert any("timeout" in m.lower() for m in rep_188.summary_messages)
+
+    # 4. ID 196 (Reallocation Event Count) eleva risco
+    rep_196 = analyze_smart_data(
+        device_id=14,
+        device_path=r"\\.\PhysicalDrive14",
+        model="Toshiba DT01ACA",
+        serial="TOS004",
+        raw_attributes={5: 0, 197: 0, 196: 5},
+        temperature_c=37
+    )
+    assert rep_196.risk_level == SmartRiskLevel.YELLOW
+    assert any("realocação" in m.lower() for m in rep_196.summary_messages)
+
+

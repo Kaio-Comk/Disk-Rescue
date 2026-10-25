@@ -1,5 +1,5 @@
 """
-diskrescue_gui.pyw — Launcher para a aplicação desktop do DiskRescue v0.3.1.
+diskrescue_gui.pyw — Launcher para a aplicação desktop do DiskRescue v0.3.2.
 Ponto de entrada para execução direta e empacotamento PyInstaller.
 Suporta flag '--smoke-test' para validação automatizada em CI e post-build.
 """
@@ -7,7 +7,7 @@ import sys
 
 if __name__ == "__main__":
     if "--smoke-test" in sys.argv:
-        print("[SMOKE TEST] Iniciando verificação de integridade do DiskRescue v0.3.1...")
+        print("[SMOKE TEST] Iniciando verificação de integridade do DiskRescue v0.3.2...")
         import tkinter as tk
         from gui.app import DiskRescueApp
 

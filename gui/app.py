@@ -1,5 +1,5 @@
 """
-gui/app.py — Interface Gráfica Moderna e Profissional (GUI) do DiskRescue v0.3.1.
+gui/app.py — Interface Gráfica Moderna e Profissional (GUI) do DiskRescue v0.3.2.
 Construída com Tkinter + Sun Valley (sv_ttk) no padrão Windows 11 Fluent Design.
 Oferece Navegação por Sidebar, Dashboard de Saúde, Diagnóstico & Reparo de Partições,
 Telemetria SMART ATA, Clonagem Resiliente em Duas Fases (estilo GNU ddrescue),
@@ -15,6 +15,7 @@ import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Optional
@@ -52,10 +53,20 @@ from core.recovery.repair import repair_gpt_partition_offset
 from core.recovery.resilient_clone import CloningResult, ResilientCloneStats, ResilientCloner
 
 
+class OperationState(Enum):
+    IDLE = "idle"
+    RUNNING = "running"
+    CANCELLING = "cancelling"
+    COMPLETED = "completed"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class DiskRescueApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("DiskRescue v0.3.1 — Diagnóstico, Clonagem Resiliente & Recuperação Forense")
+        self.root.title("DiskRescue v0.3.2 — Diagnóstico, Clonagem Resiliente & Recuperação Forense")
         self.root.geometry("1240x820")
         self.root.minsize(1080, 720)
 
@@ -68,6 +79,7 @@ class DiskRescueApp:
             sv_ttk.set_theme("dark")
 
         # Estado da Aplicação
+        self.op_state: OperationState = OperationState.IDLE
         self.disks: list[DiskInfo] = []
         self.selected_disk: Optional[DiskInfo] = None
         self.is_scanning = False
@@ -844,6 +856,14 @@ class DiskRescueApp:
         )
         self.btn_start_carve.pack(side=tk.RIGHT)
 
+        self.btn_cancel_carve = ttk.Button(
+            carve_actions,
+            text="⏸️ Interromper Carving",
+            state=tk.DISABLED,
+            command=self._cancel_carver
+        )
+        self.btn_cancel_carve.pack(side=tk.RIGHT, padx=(0, 6))
+
     # ══════════════════════════════════════════════════════════════════════════
     # TELA 6: VARREDURA DE SUPERFÍCIE (HEATMAP DE LATÊNCIA)
     # ══════════════════════════════════════════════════════════════════════════
@@ -973,21 +993,32 @@ class DiskRescueApp:
         self.msg_queue.put(("status", text))
 
     def _on_close_window(self):
-        """Encerramento limpo e seguro das threads em execução."""
-        if self.cloner_instance:
+        """Encerramento limpo e seguro das threads e operações ativas."""
+        has_active = (
+            (self.cloner_instance is not None) or
+            (self.carver_instance is not None and getattr(self.carver_instance, "cancel_requested", False) is False) or
+            self.is_scanning or
+            (not self.cancel_surface_flag and getattr(self, "block_canvas_idx", 0) > 0)
+        )
+
+        if has_active:
             if not messagebox.askyesno(
                 "Confirmar Saída",
-                "Uma operação de clonagem resiliente está em andamento.\n\n"
-                "Deseja interromper a cópia, salvar o arquivo de mapa (.map) e sair com segurança?"
+                "Existem tarefas ativas em execução (clonagem, carving, varredura de superfície ou geometria).\n\n"
+                "Deseja interromper as operações cooperativamente e fechar o aplicativo com segurança?"
             ):
                 return
+
+        if self.cloner_instance:
             self._cancel_clone()
 
         if self.carver_instance and hasattr(self.carver_instance, "cancel"):
             self.carver_instance.cancel()
 
         self.cancel_surface_flag = True
+        self.is_scanning = False
         self.is_running = False
+        self.op_state = OperationState.CANCELLED
         self.root.destroy()
 
     def _start_queue_poller(self):
@@ -1005,6 +1036,15 @@ class DiskRescueApp:
                     self._render_disks_list(val)
                 elif kind == "scan_finished":
                     self._render_scan_results(*val)
+                elif kind == "scan_error":
+                    self.log(f"ERRO NA VARREDURA: {val}\n")
+                    messagebox.showerror("Erro na Varredura", f"Falha durante a varredura:\n{val}")
+                elif kind == "scan_ended":
+                    self.is_scanning = False
+                    self.progress_bar.stop()
+                    self.progress_bar.pack_forget()
+                    self.btn_run_scan.config(state=tk.NORMAL)
+                    self.op_state = OperationState.IDLE
                 elif kind == "smart_loaded":
                     if isinstance(val, tuple):
                         self._render_smart_results(*val)
@@ -1024,6 +1064,7 @@ class DiskRescueApp:
                     self.btn_start_clone.config(state=tk.NORMAL)
                     self.btn_cancel_clone.config(state=tk.DISABLED)
                     self.cloner_instance = None
+                    self.op_state = OperationState.IDLE
                 elif kind == "carver_file":
                     self.carver_tree.insert(
                         "",
@@ -1036,7 +1077,9 @@ class DiskRescueApp:
                     messagebox.showerror("Erro no File Carving", f"Falha durante o carving:\n{val}")
                 elif kind == "carver_ended":
                     self.btn_start_carve.config(state=tk.NORMAL)
+                    self.btn_cancel_carve.config(state=tk.DISABLED)
                     self.carver_instance = None
+                    self.op_state = OperationState.IDLE
                 elif kind == "surface_block":
                     self._draw_surface_block(*val)
                 elif kind == "surface_finished":
@@ -1050,6 +1093,7 @@ class DiskRescueApp:
                 elif kind == "surface_ended":
                     self.btn_start_surface.config(state=tk.NORMAL)
                     self.btn_cancel_surface.config(state=tk.DISABLED)
+                    self.op_state = OperationState.IDLE
                 elif kind == "repair_result":
                     res = val
                     if res.success:
@@ -1070,10 +1114,13 @@ class DiskRescueApp:
                         if res.backup_file:
                             self.log(f"Snapshot preventivo salvo em: {res.backup_file}\n")
                         messagebox.showinfo("Sucesso", f"Boot Sector NTFS restaurado com sucesso!\n\n{res.message}")
+                        self.btn_repair_boot.config(state=tk.DISABLED)
+                        self.set_status("Boot Sector NTFS restaurado com sucesso.")
                     else:
                         self.log(f"FALHA NA RESTAURAÇÃO: {res.message}\n")
                         messagebox.showerror("Falha na Restauração", res.message)
-                    self.btn_repair_boot.config(state=tk.NORMAL)
+                        self.btn_repair_boot.config(state=tk.NORMAL)
+                        self.set_status("Falha na restauração do Boot Sector NTFS.")
                 elif kind == "boot_restore_error":
                     self.log(f"ERRO NA RESTAURAÇÃO: {val}\n")
                     messagebox.showerror("Erro Crítico", f"Falha inesperada durante restauração de Boot Sector:\n{val}")
@@ -1255,6 +1302,7 @@ class DiskRescueApp:
             return
 
         self.is_scanning = True
+        self.op_state = OperationState.RUNNING
         self.btn_run_scan.config(state=tk.DISABLED)
         self.progress_bar.pack(side=tk.RIGHT, padx=10)
         self.progress_bar.start(10)
@@ -1266,58 +1314,67 @@ class DiskRescueApp:
         def worker():
             gpt = None
             mbr = None
-            try:
-                with open(target_disk.device_path, "rb") as f:
-                    gpt = parse_gpt(f)
-                    f.seek(0)
-                    mbr = parse_mbr(f)
-            except Exception as e:
-                self.log(f"Erro ao ler tabelas de partição: {e}")
-
-            fs_list = scan_boot_sectors(target_disk.device_path, max_lba=1_500_000)
-
-            # Diagnóstico de integridade do Boot Sector NTFS nas partições candidatas
+            fs_list = []
             ntfs_boot_diag = None
             ntfs_target_partition = None
             try:
-                if gpt and gpt.partitions:
-                    for p in gpt.partitions:
-                        total_p_sectors = p.last_lba - p.first_lba + 1
-                        if total_p_sectors > 2048:
-                            diag = diagnose_ntfs_boot_sectors(target_disk.device_path, p.first_lba, total_p_sectors)
-                            if diag.can_repair:
-                                ntfs_boot_diag = diag
-                                ntfs_target_partition = (p.first_lba, total_p_sectors)
-                                break
-                            elif diag.primary_valid and not ntfs_boot_diag:
-                                ntfs_boot_diag = diag
-                                ntfs_target_partition = (p.first_lba, total_p_sectors)
-                elif mbr and mbr.has_valid_signature:
-                    for p in mbr.partitions:
-                        if not p.is_empty and p.size_sectors > 2048:
-                            diag = diagnose_ntfs_boot_sectors(target_disk.device_path, p.start_lba, p.size_sectors)
-                            if diag.can_repair:
-                                ntfs_boot_diag = diag
-                                ntfs_target_partition = (p.start_lba, p.size_sectors)
-                                break
-                            elif diag.primary_valid and not ntfs_boot_diag:
-                                ntfs_boot_diag = diag
-                                ntfs_target_partition = (p.start_lba, p.size_sectors)
-                elif fs_list:
-                    for fs in fs_list:
-                        if fs.fs_type == "NTFS":
-                            diag = diagnose_ntfs_boot_sectors(target_disk.device_path, fs.start_lba, fs.total_sectors)
-                            if diag.can_repair:
-                                ntfs_boot_diag = diag
-                                ntfs_target_partition = (fs.start_lba, fs.total_sectors)
-                                break
-                            elif not ntfs_boot_diag:
-                                ntfs_boot_diag = diag
-                                ntfs_target_partition = (fs.start_lba, fs.total_sectors)
-            except Exception as e:
-                self.log(f"Aviso durante diagnóstico de boot sectors: {e}")
+                try:
+                    with open(target_disk.device_path, "rb") as f:
+                        gpt = parse_gpt(f)
+                        f.seek(0)
+                        mbr = parse_mbr(f)
+                except Exception as e:
+                    self.msg_queue.put(("log", f"Erro ao ler tabelas de partição: {e}\n"))
 
-            self.msg_queue.put(("scan_finished", (gpt, mbr, fs_list, target_disk, ntfs_boot_diag, ntfs_target_partition)))
+                try:
+                    fs_list = scan_boot_sectors(target_disk.device_path, max_lba=1_500_000)
+                except Exception as e:
+                    self.msg_queue.put(("log", f"Erro durante varredura de boot sectors: {e}\n"))
+
+                # Diagnóstico de integridade do Boot Sector NTFS nas partições candidatas
+                try:
+                    if gpt and gpt.partitions:
+                        for p in gpt.partitions:
+                            total_p_sectors = p.last_lba - p.first_lba + 1
+                            if total_p_sectors > 2048:
+                                diag = diagnose_ntfs_boot_sectors(target_disk.device_path, p.first_lba, total_p_sectors)
+                                if diag.can_repair:
+                                    ntfs_boot_diag = diag
+                                    ntfs_target_partition = (p.first_lba, total_p_sectors)
+                                    break
+                                elif diag.primary_valid and not ntfs_boot_diag:
+                                    ntfs_boot_diag = diag
+                                    ntfs_target_partition = (p.first_lba, total_p_sectors)
+                    elif mbr and mbr.has_valid_signature:
+                        for p in mbr.partitions:
+                            if not p.is_empty and p.size_sectors > 2048:
+                                diag = diagnose_ntfs_boot_sectors(target_disk.device_path, p.start_lba, p.size_sectors)
+                                if diag.can_repair:
+                                    ntfs_boot_diag = diag
+                                    ntfs_target_partition = (p.start_lba, p.size_sectors)
+                                    break
+                                elif diag.primary_valid and not ntfs_boot_diag:
+                                    ntfs_boot_diag = diag
+                                    ntfs_target_partition = (p.start_lba, p.size_sectors)
+                    elif fs_list:
+                        for fs in fs_list:
+                            if fs.fs_type == "NTFS":
+                                diag = diagnose_ntfs_boot_sectors(target_disk.device_path, fs.start_lba, fs.total_sectors)
+                                if diag.can_repair:
+                                    ntfs_boot_diag = diag
+                                    ntfs_target_partition = (fs.start_lba, fs.total_sectors)
+                                    break
+                                elif not ntfs_boot_diag:
+                                    ntfs_boot_diag = diag
+                                    ntfs_target_partition = (fs.start_lba, fs.total_sectors)
+                except Exception as e:
+                    self.msg_queue.put(("log", f"Aviso durante diagnóstico de boot sectors: {e}\n"))
+
+                self.msg_queue.put(("scan_finished", (gpt, mbr, fs_list, target_disk, ntfs_boot_diag, ntfs_target_partition)))
+            except Exception as exc:
+                self.msg_queue.put(("scan_error", str(exc)))
+            finally:
+                self.msg_queue.put(("scan_ended", None))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1651,6 +1708,8 @@ class DiskRescueApp:
             self.carver_tree.delete(item)
 
         self.btn_start_carve.config(state=tk.DISABLED)
+        self.btn_cancel_carve.config(state=tk.NORMAL)
+        self.op_state = OperationState.RUNNING
         self.set_status("File Carving em execução nos setores brutos...")
         carver = FileCarver(target_disk.device_path, out_path)
         self.carver_instance = carver
@@ -1671,6 +1730,13 @@ class DiskRescueApp:
                 self.msg_queue.put(("carver_ended", None))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _cancel_carver(self):
+        if getattr(self, "carver_instance", None) and hasattr(self.carver_instance, "cancel"):
+            self.carver_instance.cancel()
+            self.btn_cancel_carve.config(state=tk.DISABLED)
+            self.set_status("Interrupção do carver solicitada. Aguardando término cooperativo...")
+            self.log("Interrupção do File Carver solicitada pelo usuário.\n")
 
     # ── VARREDURA DE SUPERFÍCIE (HEATMAP) ─────────────────────────────────────
     def _start_surface_scan(self):

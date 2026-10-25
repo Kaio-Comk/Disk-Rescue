@@ -257,3 +257,134 @@ def test_repair_gpt_creates_both_primary_and_backup_snapshots(tmp_path):
     assert backup_snaps[0].stat().st_size == 33 * 512
 
 
+def test_repair_gpt_dynamic_entries_calculation_64_entries(tmp_path):
+    """P1 Teste: Valida cálculo dinâmico de regiões GPT com 64 entradas (não fixo em 34 setores)."""
+    from core.filesystem.scanner import DiscoveredFilesystem
+    from core.recovery.repair import repair_gpt_partition_offset
+
+    total_sectors = 100_000
+    disk_bytes = bytearray(64 * 512)
+    # Header GPT com 64 entradas (64 * 128 = 8192 bytes = 16 setores)
+    header = bytearray(512)
+    header[0:8] = b"EFI PART"
+    rev = 0x00010000
+    h_size = 92
+    cur_lba = 1
+    backup_lba = 99999
+    first_usable = 18  # 1 (protective) + 1 (header) + 16 (entries) = 18
+    last_usable = 99980
+    disk_guid = b"\x05" * 16
+    part_lba = 2
+    num_entries = 64
+    entry_size = 128
+
+    p1 = GPTPartitionEntry(
+        index=1,
+        type_guid=b"\xa2\xa0\xd0\xeb" + b"\x00" * 12,
+        unique_guid=b"\x06" * 16,
+        first_lba=2048,
+        last_lba=50000,
+        flags=0x8000000000000000,
+        name="Dynamic Data"
+    )
+    entries = bytearray(num_entries * entry_size)
+    entries[0:128] = p1.to_bytes(entry_size)
+    part_crc = zlib.crc32(entries) & 0xFFFFFFFF
+
+    struct.pack_into(
+        "<8sIIIIQQQQ16sQIII",
+        header, 0,
+        b"EFI PART", rev, h_size, 0, 0,
+        cur_lba, backup_lba, first_usable, last_usable,
+        disk_guid, part_lba, num_entries, entry_size, part_crc
+    )
+    h_crc = zlib.crc32(header[:h_size]) & 0xFFFFFFFF
+    struct.pack_into("<I", header, 16, h_crc)
+
+    disk_bytes[512:1024] = header
+    disk_bytes[1024 : 1024 + len(entries)] = entries
+    disk_bytes.extend(b"\x00" * ((total_sectors - 64) * 512))
+
+    img = tmp_path / "dynamic_64_entries.bin"
+    img.write_bytes(disk_bytes)
+    backup_dir = tmp_path / "dynamic_snapshots"
+
+    fs = DiscoveredFilesystem("NTFS", start_lba=4000, total_sectors=20000, size_bytes=20000 * 512)
+    res = repair_gpt_partition_offset(str(img), target_partition_index=1, discovered_fs=fs, backup_dir=backup_dir)
+    assert res.success is True
+
+    # Primário: LBA 0 (1) + Header (1) + 16 setores de entradas = 18 setores
+    primary_snaps = list(backup_dir.glob("backup_gpt_primary_*.bin"))
+    # Backup: 16 setores de entradas + 1 de cabeçalho = 17 setores
+    backup_snaps = list(backup_dir.glob("backup_gpt_secondary_*.bin"))
+
+    assert len(primary_snaps) >= 1
+    assert len(backup_snaps) >= 1
+    assert primary_snaps[0].stat().st_size == 18 * 512
+    assert backup_snaps[0].stat().st_size == 17 * 512
+
+
+def test_repair_gpt_executes_verified_rollback_on_failure(tmp_path, monkeypatch):
+    """P0 Teste: Garante que um erro na gravação aciona rollback verificado e restaura os dados originais."""
+    from core.filesystem.scanner import DiscoveredFilesystem
+    from core.recovery.repair import repair_gpt_partition_offset
+
+    total_sectors = 100_000
+    disk_bytes = bytearray(64 * 512)
+    base_gpt = _criar_gpt_sintetico()
+    disk_bytes[:len(base_gpt)] = base_gpt
+    disk_bytes.extend(b"\x00" * ((total_sectors - 64) * 512))
+
+    struct.pack_into("<Q", disk_bytes, 512 + 32, 99999)
+    struct.pack_into("<Q", disk_bytes, 512 + 48, 90000)
+    disk_bytes[512 + 16 : 512 + 20] = b"\x00\x00\x00\x00"
+    h_crc = zlib.crc32(disk_bytes[512 : 512 + 92]) & 0xFFFFFFFF
+    struct.pack_into("<I", disk_bytes, 512 + 16, h_crc)
+
+    img = tmp_path / "rollback_test_disk.bin"
+    img.write_bytes(disk_bytes)
+    original_content = img.read_bytes()
+    backup_dir = tmp_path / "rollback_snapshots"
+
+    # Simula falha física na gravação durante a escrita de entradas
+    import builtins
+    real_open = builtins.open
+
+    class FaultyFile:
+        def __init__(self, target):
+            self._target = target
+            self._write_count = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return self._target.__exit__(exc_type, exc_val, exc_tb)
+
+        def write(self, data):
+            self._write_count += 1
+            if self._write_count == 2:  # Falha simulada após gravar cabeçalho primário
+                raise OSError("Falha simulada de hardware durante escrita de setor GPT")
+            return self._target.write(data)
+
+        def __getattr__(self, name):
+            return getattr(self._target, name)
+
+    def mock_open(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        if "r+b" in mode:
+            return FaultyFile(f)
+        return f
+
+    monkeypatch.setattr(builtins, "open", mock_open)
+
+    fs = DiscoveredFilesystem("NTFS", start_lba=40000, total_sectors=10001, size_bytes=10001 * 512)
+    res = repair_gpt_partition_offset(str(img), target_partition_index=2, discovered_fs=fs, backup_dir=backup_dir)
+
+    assert res.success is False
+    assert "Rollback executado com sucesso e verificado" in res.message
+    # Garante que os bytes do disco após o rollback voltaram exatamente ao estado original
+    assert img.read_bytes() == original_content
+
+
+
