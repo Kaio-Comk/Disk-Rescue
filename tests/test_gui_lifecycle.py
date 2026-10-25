@@ -16,10 +16,14 @@ from core.recovery.resilient_clone import ResilientCloneStats
 from gui.app import DiskRescueApp
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def mock_gui():
-    root = tk.Tk()
-    root.withdraw()  # Não exibe janela física durante testes
+    try:
+        root = tk.Tk()
+        root.withdraw()  # Não exibe janela física durante testes
+    except Exception as e:
+        pytest.skip(f"Ambiente headless sem suporte a Tkinter/Tcl: {e}")
+
     app = DiskRescueApp(root)
     root.update()
     yield app, root
