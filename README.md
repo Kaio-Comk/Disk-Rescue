@@ -1,7 +1,7 @@
 # 🛠️ DiskRescue
 
 [![Release](https://img.shields.io/github/v/release/Kaio-Comk/Disk-Rescue?color=blue&label=Vers%C3%A3o)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)
-[![Tests](https://img.shields.io/badge/Testes-120%2F120%20Aprovados-success)](https://github.com/Kaio-Comk/Disk-Rescue)
+[![Tests](https://img.shields.io/badge/Testes-123%2F123%20Aprovados-success)](https://github.com/Kaio-Comk/Disk-Rescue)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-blue?logo=python)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Plataforma-Windows%2011%20Fluent-0078d4?logo=windows)](https://github.com/Kaio-Comk/Disk-Rescue)
 [![License](https://img.shields.io/badge/Licen%C3%A7a-MIT-green)](LICENSE)
@@ -10,31 +10,31 @@
 
 O **DiskRescue** é uma suíte de engenharia reversa e recuperação de dados projetada para HDDs, SSDs, pendrives e mídias removíveis. Ele combina análise estrutural de baixo nível (parsers nativos de MBR, GPT, NTFS, FAT32 e exFAT), telemetria S.M.A.R.T. preditiva com isolamento de falhas de cabo SATA, motor de clonagem em duas fases (estilo GNU `ddrescue`) com contabilização integral de LBAs e mapa atômico de retomada, extração direta contínua de arquivos (*File Carving*) com validação estrutural pós-extração e suporte multi-bloco, além de visualização gráfica de latência de superfície (*Heatmap*).
 
-A aplicação conta com uma interface desktop moderna no padrão **Windows 11 Fluent Design** com barra lateral de navegação (Sidebar Rail), dashboard executivo de saúde física e é distribuída como binário portátil autônomo (`DiskRescue.exe`) com ícone oficial multi-resolução e solicitação nativa de privilégios de administrador (UAC).
+A aplicação conta com uma interface desktop moderna no padrão **Windows 11 Fluent Design** com barra lateral de navegação (Sidebar Rail), suporte multilíngue dinâmico em tempo real (Português, Inglês, Espanhol, Francês, Alemão, Italiano, Russo, Chinês e Japonês), dashboard executivo de saúde física e é distribuída como instalador profissional padrão Windows (`DiskRescue-Setup-v0.3.3.exe` com 26 idiomas) e como binário portátil autônomo (`DiskRescue.exe`).
 
 ---
 
-## ⚡ Download Imediato do Executável
+## ⚡ Download Imediato do Executável & Instalador
 
 > **Nota de Governança de Versão:**
 > * **Última Release Oficial Publicada no GitHub:** `v0.3.2` (`32,772,109` bytes, SHA-256 `F37801262B94D03D1A442126A88311BCBA86AA94FB5B65624418CC65B54443E4`).
-> * **Versão Local Validada (Candidata Local):** `v0.3.3` (`33,868,932` bytes / ~32.30 MB, SHA-256 `5076B3B1087BB97B2A30B476C9BD2F9FC4A7A85CF7DCF8AF8506EB34B7A169E1`, 120/120 testes aprovados).
-> * **Instalador Oficial para Windows (Setup Wizard):** `DiskRescue-Setup-v0.3.3.exe` (`35,421,731` bytes / ~33.78 MB, SHA-256 `0D89630D676971ABD4D6AC18CE4ABDB7AE3EF386F1585809B14F934B140568AE`).
+> * **Versão Local Validada (Candidata Local):** `v0.3.3` (`33,894,692` bytes / ~32.32 MB, SHA-256 `AB26F3343CCC2631293CE64440DAA0E1128A56C55423E575DD84387182EE3840`, 123/123 testes aprovados).
+> * **Instalador Oficial Multilíngue (Setup Wizard 26 Idiomas):** `DiskRescue-Setup-v0.3.3.exe` (`35,543,114` bytes / ~33.89 MB, SHA-256 `3F3798B0F85690521D8F343DFBFD6B6A1615E4482018ED6EA148E37D30707F67`).
 
 Baixe a última release oficial publicada no GitHub:
 👉 **[Baixar DiskRescue v0.3.2 (Release Oficial Publicada)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)**
 
 * **Opções de Distribuição Profissional:**
-  * **Instalador Oficial (`DiskRescue-Setup-v0.3.3.exe`):** Assistente de instalação completo padrão Windows (Inno Setup 6). Instala em `Program Files\DiskRescue`, cria atalhos no Menu Iniciar e na Área de Trabalho com o ícone oficial, registra o desinstalador em *Aplicativos Instalados* do Windows (`unins000.exe`) e oferece inicialização automática.
+  * **Instalador Oficial Multilíngue (`DiskRescue-Setup-v0.3.3.exe`):** Assistente de instalação completo padrão Windows (Inno Setup 6 com 26 idiomas nativos). Instala em `Program Files\DiskRescue`, cria atalhos no Menu Iniciar e na Área de Trabalho com o ícone oficial, registra o desinstalador em *Aplicativos Instalados* do Windows (`unins000.exe`) e oferece inicialização automática.
   * **Executável Portátil Autônomo (`DiskRescue.exe`):** Não requer instalação nem dependências externas.
 * **Integridade Criptográfica (SHA-256):**
-  * **Instalador Windows (`DiskRescue-Setup-v0.3.3.exe` — 35,421,731 bytes):**
+  * **Instalador Windows (`DiskRescue-Setup-v0.3.3.exe` — 35,543,114 bytes):**
     ```text
-    0D89630D676971ABD4D6AC18CE4ABDB7AE3EF386F1585809B14F934B140568AE
+    3F3798B0F85690521D8F343DFBFD6B6A1615E4482018ED6EA148E37D30707F67
     ```
-  * **Build Local Portátil (`v0.3.3` candidata local — 33,868,932 bytes):**
+  * **Build Local Portátil (`v0.3.3` candidata local — 33,894,692 bytes):**
     ```text
-    5076B3B1087BB97B2A30B476C9BD2F9FC4A7A85CF7DCF8AF8506EB34B7A169E1
+    AB26F3343CCC2631293CE64440DAA0E1128A56C55423E575DD84387182EE3840
     ```
   * **Release Publicada (`v0.3.2` — 32,772,109 bytes):**
     ```text
@@ -156,12 +156,12 @@ O DiskRescue foi concebido com foco absoluto na integridade física e preservaç
 
 ## 🧪 Cobertura de Testes Automatizados
 
-O sistema conta com suíte completa de **120 testes unitários, concorrentes e de integração de interface** automatizados:
+O sistema conta com suíte completa de **123 testes unitários, concorrentes e de integração de interface** automatizados:
 
 ```bash
 $ pytest tests/ -v
 ...
-============================ 120 passed in 22.28s =============================
+============================ 123 passed in 20.74s =============================
 ```
 
 ---

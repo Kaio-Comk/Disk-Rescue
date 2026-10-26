@@ -51,6 +51,13 @@ from core.hardware.device_resolver import (
 from core.hardware.scanner import DiskInfo, is_admin, relaunch_as_admin, scan_disks
 from core.hardware.smart import SmartReport, SmartRiskLevel, query_smart_report_windows
 from core.hardware.surface_scan import SurfaceBlockResult, SurfaceScanSummary, scan_surface_latency
+from core.i18n import (
+    SUPPORTED_LANGUAGES,
+    detect_system_language,
+    get_current_language,
+    set_language,
+    t,
+)
 from core.partition.gpt import GPTPartitionEntry, GPTTable, parse_gpt
 from core.partition.mbr import parse_mbr
 from core.recovery.carver import CarvedFile, FileCarver
@@ -647,12 +654,12 @@ class DiskRescueApp:
         )
         self.lbl_version_badge.pack(side=tk.LEFT, padx=(10, 0), anchor=tk.CENTER)
 
-        app_subtitle = ttk.Label(
+        self.lbl_app_subtitle = ttk.Label(
             text_stack,
-            text="Diagnóstico Profundo em 1-Clique • S.M.A.R.T. ATA/NVMe • Clonagem Resiliente • Reparo GPT/NTFS",
+            text=t("app_subtitle"),
             style="HeaderSub.TLabel",
         )
-        app_subtitle.pack(anchor=tk.W, pady=(1, 0))
+        self.lbl_app_subtitle.pack(anchor=tk.W, pady=(1, 0))
 
         actions_box = ttk.Frame(self.header_frame, style="Header.TFrame")
         actions_box.pack(side=tk.RIGHT, anchor=tk.CENTER)
@@ -660,7 +667,7 @@ class DiskRescueApp:
         elevated = is_admin()
         uac_bg = p["success_bg"] if elevated else p["warning_bg"]
         uac_fg = p["success_fg"] if elevated else p["warning_fg"]
-        uac_text = "MODO ADMINISTRADOR (ACESSO RAW ATIVO)" if elevated else "MODO LEITURA (SEM UAC)"
+        uac_text = t("uac_admin") if elevated else t("uac_user")
 
         self.lbl_uac = ttk.Label(
             actions_box,
@@ -672,10 +679,27 @@ class DiskRescueApp:
         )
         self.lbl_uac.pack(side=tk.LEFT, padx=(0, 10))
 
+        # Seletor de Idioma Internacional
+        lang_box = ttk.Frame(actions_box, style="Header.TFrame")
+        lang_box.pack(side=tk.LEFT, padx=(0, 8))
+        self.lbl_lang_globe = ttk.Label(lang_box, text="🌐", font=("Segoe UI", 9), style="HeaderSub.TLabel")
+        self.lbl_lang_globe.pack(side=tk.LEFT, padx=(0, 3))
+
+        self.combo_lang = ttk.Combobox(
+            lang_box,
+            state="readonly",
+            width=13,
+            values=list(SUPPORTED_LANGUAGES.values()),
+            font=("Segoe UI Semibold", 8),
+        )
+        self.combo_lang.set(SUPPORTED_LANGUAGES.get(get_current_language(), "Português (BR)"))
+        self.combo_lang.pack(side=tk.LEFT)
+        self.combo_lang.bind("<<ComboboxSelected>>", self._on_language_changed)
+
         if not elevated:
             self.btn_elevate = ttk.Button(
                 actions_box,
-                text="Elevar UAC",
+                text=t("btn_elevate"),
                 command=self._on_elevate,
                 style="Accent.TButton",
                 width=11,
@@ -684,7 +708,7 @@ class DiskRescueApp:
 
         self.btn_refresh = ttk.Button(
             actions_box,
-            text="Atualizar Discos",
+            text=t("btn_refresh"),
             command=self.refresh_disks,
             width=15,
         )
@@ -693,7 +717,7 @@ class DiskRescueApp:
         if HAS_SV_TTK:
             self.btn_theme = ttk.Button(
                 actions_box,
-                text="Tema: Escuro",
+                text=t("btn_theme_dark"),
                 command=self._toggle_theme,
                 width=12,
             )
@@ -706,20 +730,21 @@ class DiskRescueApp:
         self.sidebar_frame.pack(side=tk.LEFT, fill=tk.Y)
         self.sidebar_frame.pack_propagate(False)
 
-        ttk.Label(
+        self.lbl_sidebar_sec = ttk.Label(
             self.sidebar_frame,
-            text="PAINEL DE NAVEGAÇÃO",
+            text=t("nav_section"),
             style="SidebarSection.TLabel",
-        ).pack(anchor=tk.W, pady=(0, 8), padx=4)
+        )
+        self.lbl_sidebar_sec.pack(anchor=tk.W, pady=(0, 8), padx=4)
 
         nav_items = [
-            ("dashboard", "Central & Diagnóstico 1-Clique"),
-            ("diagnostic", "Partições, GPT & Boot NTFS"),
-            ("smart", "Sensores S.M.A.R.T. & Cabos"),
-            ("clone", "Clonagem Resiliente (.img)"),
-            ("carver", "File Carving Forense"),
-            ("surface", "Mapa de Calor & Latência"),
-            ("logs", "Console de Auditoria"),
+            ("dashboard", t("nav_dashboard")),
+            ("diagnostic", t("nav_diagnostic")),
+            ("smart", t("nav_smart")),
+            ("clone", t("nav_clone")),
+            ("carver", t("nav_carver")),
+            ("surface", t("nav_surface")),
+            ("logs", t("nav_logs")),
         ]
 
         for key, label in nav_items:
@@ -798,11 +823,12 @@ class DiskRescueApp:
         top_row = ttk.Frame(self.drive_banner, style="Card.TFrame")
         top_row.pack(fill=tk.X)
 
-        ttk.Label(
+        self.lbl_target_drive = ttk.Label(
             top_row,
-            text="UNIDADE FÍSICA ALVO:",
+            text=t("target_drive"),
             style="CardTitle.TLabel",
-        ).pack(side=tk.LEFT, padx=(0, 10))
+        )
+        self.lbl_target_drive.pack(side=tk.LEFT, padx=(0, 10))
 
         self.combo_disks = ttk.Combobox(top_row, state="readonly", width=44, font=("Segoe UI Semibold", 9))
         self.combo_disks.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 12))
@@ -811,7 +837,7 @@ class DiskRescueApp:
         # Botão Hero Global de Diagnóstico Completo em 1 Clique
         bolt_ic = self._icon_refs.get("bolt")
         diag_btn_kw = {
-            "text": "  DIAGNOSTICAR TUDO (1-CLIQUE)",
+            "text": "  " + t("btn_diag_all"),
             "style": "Accent.TButton",
             "command": self._start_full_diagnostic,
         }
@@ -2006,6 +2032,90 @@ class DiskRescueApp:
         self.surface_canvas.configure(bg=p["bg_input"], highlightbackground=p["border"])
         self._update_health_gauge(None, p["accent"], self.lbl_gauge_score.cget("text"))
         self._switch_view(self.active_view)
+
+    def _on_language_changed(self, event=None):
+        selected_display = self.combo_lang.get()
+        for code, name in SUPPORTED_LANGUAGES.items():
+            if name == selected_display:
+                set_language(code)
+                break
+        self._apply_language()
+
+    def _apply_language(self):
+        """Atualiza dinamicamente os textos da interface conforme o idioma selecionado."""
+        if hasattr(self, "lbl_app_subtitle"):
+            self.lbl_app_subtitle.config(text=t("app_subtitle"))
+        if hasattr(self, "lbl_version_badge"):
+            self.lbl_version_badge.config(text=t("version_badge"))
+        if hasattr(self, "lbl_target_drive"):
+            self.lbl_target_drive.config(text=t("target_drive"))
+        if hasattr(self, "btn_full_diagnostic"):
+            self.btn_full_diagnostic.config(text="  " + t("btn_diag_all"))
+        if hasattr(self, "btn_refresh"):
+            self.btn_refresh.config(text=t("btn_refresh"))
+        if hasattr(self, "btn_elevate"):
+            self.btn_elevate.config(text=t("btn_elevate"))
+        if hasattr(self, "lbl_sidebar_sec"):
+            self.lbl_sidebar_sec.config(text=t("nav_section"))
+
+        elevated = is_admin()
+        if hasattr(self, "lbl_uac"):
+            self.lbl_uac.config(text=t("uac_admin") if elevated else t("uac_user"))
+
+        nav_labels = {
+            "dashboard": t("nav_dashboard"),
+            "diagnostic": t("nav_diagnostic"),
+            "smart": t("nav_smart"),
+            "clone": t("nav_clone"),
+            "carver": t("nav_carver"),
+            "surface": t("nav_surface"),
+            "logs": t("nav_logs"),
+        }
+        for k, label in nav_labels.items():
+            if k in self.nav_buttons:
+                ic = self._icon_refs.get(k)
+                self.nav_buttons[k].config(text=f"  {label}" if ic else label)
+
+        if hasattr(self, "btn_hero_scan"):
+            self.btn_hero_scan.config(text=t("btn_hero_scan"))
+        if hasattr(self, "btn_stop_diag"):
+            self.btn_stop_diag.config(text=t("btn_stop_diag"))
+        if hasattr(self, "btn_run_scan"):
+            self.btn_run_scan.config(text=t("btn_run_geometry_scan"))
+        if hasattr(self, "btn_repair_boot"):
+            self.btn_restore_boot = getattr(self, "btn_repair_boot", None)
+            if self.btn_restore_boot:
+                self.btn_restore_boot.config(text=t("btn_restore_boot"))
+        if hasattr(self, "btn_start_clone"):
+            self.btn_start_clone.config(text=t("clone_btn_start"))
+        if hasattr(self, "btn_cancel_clone"):
+            self.btn_cancel_clone.config(text=t("clone_btn_cancel"))
+        if hasattr(self, "btn_start_carve"):
+            self.btn_start_carve.config(text=t("carver_btn_start"))
+        if hasattr(self, "btn_cancel_carve"):
+            self.btn_cancel_carve.config(text=t("carver_btn_cancel"))
+        if hasattr(self, "btn_start_surface"):
+            self.btn_start_surface.config(text=t("surface_btn_start"))
+        if hasattr(self, "btn_cancel_surface"):
+            self.btn_cancel_surface.config(text=t("surface_btn_cancel"))
+
+        # Atualiza a lista de opções de profundidade de varredura
+        self.scan_modes = [
+            t("mode_deep"),
+            t("mode_full"),
+            t("mode_quick"),
+        ]
+        if hasattr(self, "combo_diag_mode"):
+            cur_mode = self.combo_diag_mode.current()
+            self.combo_diag_mode.config(values=self.scan_modes)
+            if 0 <= cur_mode < len(self.scan_modes):
+                self.combo_diag_mode.current(cur_mode)
+            else:
+                self.combo_diag_mode.current(0)
+        if hasattr(self, "combo_surface_mode"):
+            self.combo_surface_mode.config(values=self.scan_modes)
+
+        self.set_status(t("status_ready"))
 
     def _on_elevate(self):
         if relaunch_as_admin():
