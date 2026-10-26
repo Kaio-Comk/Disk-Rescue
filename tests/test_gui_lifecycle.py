@@ -608,6 +608,65 @@ def test_gui_theme_toggle_updates_all_styled_widgets(mock_gui):
         assert app.txt_gpt.cget("bg").lower() == PALETTES["dark"]["bg_input"].lower()
 
 
+def test_gui_one_click_full_diagnostic(mock_gui, tmp_path, monkeypatch):
+    """
+    Valida que o botão de Diagnóstico Completo em 1 Clique (_start_full_diagnostic)
+    executa todas as etapas (SMART, GPT/MBR, Boot Sectors e Superfície) e atualiza a Matriz de 6 Camadas.
+    """
+    import time
+    from core.hardware.smart import analyze_smart_data
+
+    app, root = mock_gui
+    dummy_disk = tmp_path / "full_diag_disk.img"
+    dummy_disk.write_bytes(b"\x00" * (128 * 512))
+
+    fake_report = analyze_smart_data(
+        device_id=2,
+        device_path=str(dummy_disk),
+        model="WD Blue 500GB",
+        serial="WD123",
+        raw_attributes={1: 0, 5: 0, 9: 1200, 10: 0, 196: 0, 197: 0, 198: 0, 199: 0},
+        temperature_c=32,
+        is_usb=False,
+    )
+    monkeypatch.setattr("gui.app.query_smart_report_windows", lambda *a, **kw: fake_report)
+
+    app.selected_disk = DiskInfo(
+        number=2,
+        device_path=str(dummy_disk),
+        friendly_name="WD Blue 500GB",
+        serial_number="WD123",
+        size_bytes=128 * 512,
+        bus_type="SATA",
+        partition_style="GPT",
+        media_type="HDD",
+        health_status="Healthy",
+        operational_status="OK",
+        temperature=32,
+        read_errors=0,
+        write_errors=0,
+        wear=None,
+        is_read_only=False,
+        is_boot=False,
+        is_system=False,
+        can_open_raw=True,
+    )
+
+    app._start_full_diagnostic()
+    deadline = time.time() + 4.0
+    while (app.is_scanning or app.is_surface_scanning) and time.time() < deadline:
+        app._process_pending_messages()
+        root.update()
+        time.sleep(0.02)
+    app._process_pending_messages()
+
+    assert app.is_scanning is False
+    assert app.is_surface_scanning is False
+    assert "NENHUMA FALHA ENCONTRADA" in app.dash_health_badge.cget("text")
+    assert "0 BAD SECTORS" in app.chk_cards["surface_io"]["badge"].cget("text")
+
+
+
 
 
 

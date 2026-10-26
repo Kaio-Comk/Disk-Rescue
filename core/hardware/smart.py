@@ -622,28 +622,50 @@ def query_smart_report_windows(
     bus_type: Optional[str] = None,
     is_usb: bool = False
 ) -> SmartReport:
-    """Obtém os contadores de confiabilidade do Windows sem confundir métricas de SO com registros SMART de hardware."""
+    """
+    Obtém telemetria S.M.A.R.T. real via WMI (MSStorageDriver_FailurePredictData / Thresholds)
+    e contadores de confiabilidade do Windows (StorageReliabilityCounter), mantendo métricas do SO
+    segregadas dos atributos ATA de hardware.
+    """
     script = f"""
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
     $phys = Get-PhysicalDisk | Where-Object {{ $_.DeviceId -eq '{device_number}' }} | Select-Object -First 1
     $rel = if ($phys) {{ $phys | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue }} else {{ $null }}
+    $dd = Get-CimInstance Win32_DiskDrive -ErrorAction SilentlyContinue | Where-Object {{ $_.Index -eq {device_number} }} | Select-Object -First 1
+    $pnp = if ($dd) {{ $dd.PNPDeviceID }} else {{ $null }}
 
-    if ($null -eq $rel) {{
-        ""
-    }} else {{
-        [PSCustomObject]@{{
-            Temperature = $rel.Temperature
-            ReadErrorsTotal = $rel.ReadErrorsTotal
-            WriteErrorsTotal = $rel.WriteErrorsTotal
-            Wear = $rel.Wear
-        }} | ConvertTo-Json
+    $smartVendor = @()
+    $smartThresh = @()
+    if ($pnp) {{
+        $pred = Get-CimInstance -Namespace root\\wmi -ClassName MSStorageDriver_FailurePredictData -ErrorAction SilentlyContinue |
+            Where-Object {{ $_.InstanceName -like "$pnp*" }} | Select-Object -First 1
+        if ($pred -and $pred.VendorSpecific) {{
+            $smartVendor = $pred.VendorSpecific
+        }}
+        $th = Get-CimInstance -Namespace root\\wmi -ClassName MSStorageDriver_FailurePredictThresholds -ErrorAction SilentlyContinue |
+            Where-Object {{ $_.InstanceName -like "$pnp*" }} | Select-Object -First 1
+        if ($th -and $th.VendorSpecific) {{
+            $smartThresh = $th.VendorSpecific
+        }}
     }}
+
+    [PSCustomObject]@{{
+        Temperature = if ($rel) {{ $rel.Temperature }} else {{ $null }}
+        ReadErrorsTotal = if ($rel) {{ $rel.ReadErrorsTotal }} else {{ $null }}
+        WriteErrorsTotal = if ($rel) {{ $rel.WriteErrorsTotal }} else {{ $null }}
+        Wear = if ($rel) {{ $rel.Wear }} else {{ $null }}
+        PowerOnHours = if ($rel) {{ $rel.PowerOnHours }} else {{ $null }}
+        VendorSpecific = $smartVendor
+        Thresholds = $smartThresh
+    }} | ConvertTo-Json -Compress
     """
     cmd = ["powershell", "-NoProfile", "-Command", script]
     creationflags = 0x08000000 if os.name == "nt" else 0
 
-    temperature = None
+    temperature: Optional[int] = None
     win_reliability: Dict[str, int] = {}
+    raw_attrs: Dict[int, int] = {}
+    norm_attrs: Dict[int, tuple[Optional[int], Optional[int], Optional[int]]] = {}
 
     try:
         r = subprocess.run(cmd, capture_output=True, timeout=10, creationflags=creationflags)
@@ -651,15 +673,47 @@ def query_smart_report_windows(
         stdout = r.stdout.decode("utf-8", errors="replace").strip()
         if stdout:
             data = json.loads(stdout)
-            temperature = data.get("Temperature")
+            t_val = data.get("Temperature")
+            if isinstance(t_val, int) and t_val > 0:
+                temperature = t_val
             if data.get("ReadErrorsTotal") is not None:
                 win_reliability["ReadErrorsTotal"] = int(data.get("ReadErrorsTotal"))
             if data.get("WriteErrorsTotal") is not None:
                 win_reliability["WriteErrorsTotal"] = int(data.get("WriteErrorsTotal"))
             if data.get("Wear") is not None:
                 win_reliability["Wear"] = int(data.get("Wear"))
+
+            vs = data.get("VendorSpecific") or []
+            th = data.get("Thresholds") or []
+            tmap: Dict[int, int] = {}
+            if isinstance(th, list) and len(th) >= 14:
+                for i in range(2, min(len(th), 362), 12):
+                    if i + 1 < len(th):
+                        aid = int(th[i])
+                        if aid != 0:
+                            tmap[aid] = int(th[i + 1])
+
+            if isinstance(vs, list) and len(vs) >= 14:
+                for i in range(2, min(len(vs), 362), 12):
+                    if i + 10 < len(vs):
+                        aid = int(vs[i])
+                        if aid == 0:
+                            continue
+                        cur = int(vs[i + 3])
+                        worst = int(vs[i + 4])
+                        raw_val = sum(int(vs[i + 5 + b]) << (8 * b) for b in range(6))
+                        # Temperatura no ID 194 (0xC2) ou 190 (0xBE) se não reportada via StorageReliabilityCounter
+                        if aid in (194, 190) and temperature is None:
+                            temp_low = raw_val & 0xFF
+                            if 0 < temp_low < 120:
+                                temperature = temp_low
+                        if aid in SMART_DEFINITIONS:
+                            raw_attrs[aid] = raw_val
+                            thresh_val = tmap.get(aid, 0)
+                            if 1 <= cur <= 255 and 1 <= worst <= 255 and 0 <= thresh_val <= 255:
+                                norm_attrs[aid] = (cur, worst, thresh_val)
     except Exception as exc:
-        log.debug("Falha na consulta de StorageReliabilityCounter: %s", exc)
+        log.debug("Falha na consulta WMI S.M.A.R.T. / StorageReliabilityCounter: %s", exc)
 
     is_usb_resolved = is_usb or bool(bus_type and "USB" in bus_type.upper())
 
@@ -668,8 +722,9 @@ def query_smart_report_windows(
         device_path=device_path,
         model=model,
         serial=serial,
-        raw_attributes={},  # Sem atributos SMART de hardware falsamente mapeados
+        raw_attributes=raw_attrs,
         temperature_c=temperature,
+        normalized_attributes=norm_attrs if norm_attrs else None,
         windows_reliability=win_reliability if win_reliability else None,
         is_usb=is_usb_resolved
     )

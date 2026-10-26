@@ -1,14 +1,13 @@
 """
 gui/app.py — Interface Gráfica Moderna e Profissional (GUI) do DiskRescue v0.3.3.
-Construída com Tkinter + Sun Valley (sv_ttk) + Design System Fluent Obsidian/Slate,
-com suporte nativo a High-DPI Per-Monitor v2 e Barra de Título Escura DWM do Windows 11.
-Oferece Navegação por Sidebar, Dashboard de Saúde, Diagnóstico & Reparo de Partições,
-Telemetria SMART ATA, Clonagem Resiliente em Duas Fases (estilo GNU ddrescue),
-File Carving por Assinaturas Mágicas, Heatmap de Latência de Superfície e Log Forense.
+Construída com Design System Fluent Obsidian, Motor Vetorial Anti-Aliased via Pillow (4x Supersampling),
+Suporte High-DPI Per-Monitor v2, Barra de Título Escura Nativa DWM do Windows 11 e
+Motor de Diagnóstico Completo em 1 Clique (SMART ATA/NVMe + Geometria GPT/MBR + Boot Sector/$MFT + Superfície).
 """
 from __future__ import annotations
 
 import ctypes
+import math
 import os
 import queue
 import subprocess
@@ -34,7 +33,7 @@ except ImportError:
     HAS_SV_TTK = False
 
 try:
-    from PIL import Image, ImageTk
+    from PIL import Image, ImageDraw, ImageTk
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
@@ -62,15 +61,16 @@ from core.recovery.resilient_clone import CloningResult, ResilientCloneStats, Re
 # ── PALETAS DE DESIGN FLUENT OBSIDIAN / SLATE ────────────────────────────────
 PALETTES: dict[str, dict[str, str]] = {
     "dark": {
-        "bg_root": "#090D16",
-        "bg_header": "#0D1322",
-        "bg_sidebar": "#0B101D",
+        "bg_root": "#070B14",
+        "bg_header": "#0B1120",
+        "bg_sidebar": "#090E1A",
         "bg_card": "#111827",
         "bg_card_alt": "#162033",
-        "bg_input": "#070B12",
+        "bg_hero": "#0F1E36",
+        "bg_input": "#060911",
         "border": "#1E293B",
         "border_subtle": "#172033",
-        "border_accent": "#0284C7",
+        "border_accent": "#0EA5E9",
         "accent": "#0EA5E9",
         "accent_hover": "#38BDF8",
         "accent_soft_bg": "#0C2D48",
@@ -86,8 +86,8 @@ PALETTES: dict[str, dict[str, str]] = {
         "danger_fg": "#F87171",
         "neutral_bg": "#1E293B",
         "neutral_fg": "#CBD5E1",
-        "tree_bg": "#0D1322",
-        "tree_alt": "#111A2E",
+        "tree_bg": "#0B1120",
+        "tree_alt": "#111827",
         "tree_head_bg": "#162033",
     },
     "light": {
@@ -96,6 +96,7 @@ PALETTES: dict[str, dict[str, str]] = {
         "bg_sidebar": "#F8FAFC",
         "bg_card": "#FFFFFF",
         "bg_card_alt": "#F8FAFC",
+        "bg_hero": "#E0F2FE",
         "bg_input": "#F8FAFC",
         "border": "#CBD5E1",
         "border_subtle": "#E2E8F0",
@@ -123,17 +124,15 @@ PALETTES: dict[str, dict[str, str]] = {
 
 
 def _enable_high_dpi() -> None:
-    """Ativa High-DPI Per-Monitor v2 no Windows para fontes e bordas ultra nítidas."""
+    """Ativa High-DPI Per-Monitor v2 no Windows para fontes e controles ultra nítidos."""
     if os.name != "nt":
         return
     try:
-        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
         ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
         return
     except Exception:
         pass
     try:
-        # PROCESS_PER_MONITOR_DPI_AWARE = 2
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
         return
     except Exception:
@@ -154,17 +153,130 @@ def _apply_windows_dwm_theme(root: tk.Tk, dark: bool = True) -> None:
             hwnd = root.winfo_id()
         dwmapi = ctypes.windll.dwmapi
 
-        # DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (fallback 19 em builds antigas do Win10)
         val = ctypes.c_int(1 if dark else 0)
         res = dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(val), ctypes.sizeof(val))
         if res != 0:
             dwmapi.DwmSetWindowAttribute(hwnd, 19, ctypes.byref(val), ctypes.sizeof(val))
 
-        # No Windows 11 (Build 22000+), DWMWA_CAPTION_COLOR = 35 e DWMWA_TEXT_COLOR = 36 (formato COLORREF 0x00BBGGRR)
-        caption_color = ctypes.c_int(0x0022130D if dark else 0x00FFFFFF)
+        caption_color = ctypes.c_int(0x0020110B if dark else 0x00FFFFFF)
         dwmapi.DwmSetWindowAttribute(hwnd, 35, ctypes.byref(caption_color), ctypes.sizeof(caption_color))
     except Exception:
         pass
+
+
+# ── MOTOR VETORIAL ANTI-ALIASED (4X SUPERSAMPLING VIA PILLOW) ────────────────
+class VectorFactory:
+    """Gera ícones vetoriais coloridos anti-aliased e medidores circulares sem depender de emojis do Windows."""
+
+    @staticmethod
+    def create_nav_icon(kind: str, bg_hex: str, fg_hex: str = "#FFFFFF", size: int = 24) -> Optional[ImageTk.PhotoImage]:
+        if not HAS_PIL:
+            return None
+        scale = 4
+        s = size * scale
+        img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+
+        # Squircle de fundo colorido
+        d.rounded_rectangle((4, 4, s - 4, s - 4), radius=int(s * 0.28), fill=bg_hex)
+        lw = max(6, int(s * 0.08))
+        m = int(s * 0.26)
+
+        if kind == "dashboard":
+            # 4 quadrantes modernos
+            mid = s // 2
+            gap = int(s * 0.05)
+            d.rounded_rectangle((m, m, mid - gap, mid - gap), radius=6, fill=fg_hex)
+            d.rounded_rectangle((mid + gap, m, s - m, mid - gap), radius=6, fill=fg_hex)
+            d.rounded_rectangle((m, mid + gap, mid - gap, s - m), radius=6, fill=fg_hex)
+            d.rounded_rectangle((mid + gap, mid + gap, s - m, s - m), radius=6, fill=fg_hex)
+        elif kind == "diagnostic":
+            # Lupa de inspeção
+            r = int(s * 0.16)
+            cx, cy = int(s * 0.44), int(s * 0.44)
+            d.ellipse((cx - r, cy - r, cx + r, cy + r), outline=fg_hex, width=lw)
+            d.line((cx + int(r * 0.7), cy + int(r * 0.7), s - m, s - m), fill=fg_hex, width=lw + 2)
+        elif kind == "smart":
+            # Linha de pulso / ECG
+            pts = [
+                (m, s // 2),
+                (int(s * 0.38), s // 2),
+                (int(s * 0.45), int(s * 0.28)),
+                (int(s * 0.55), int(s * 0.72)),
+                (int(s * 0.62), s // 2),
+                (s - m, s // 2),
+            ]
+            d.line(pts, fill=fg_hex, width=lw, joint="curve")
+        elif kind == "clone":
+            # Dois discos sobrepostos
+            d.rounded_rectangle((m, m, int(s * 0.62), int(s * 0.62)), radius=8, outline=fg_hex, width=lw)
+            d.rounded_rectangle((int(s * 0.38), int(s * 0.38), s - m, s - m), radius=8, fill=fg_hex)
+        elif kind == "carver":
+            # Camadas forenses
+            mid_x = s // 2
+            d.polygon([(mid_x, m), (s - m, int(s * 0.44)), (mid_x, int(s * 0.58)), (m, int(s * 0.44))], fill=fg_hex)
+            d.line([(m, int(s * 0.62)), (mid_x, int(s * 0.76)), (s - m, int(s * 0.62))], fill=fg_hex, width=lw)
+        elif kind == "surface":
+            # Grade de blocos de calor
+            cell = (s - 2 * m - 8) // 2
+            d.rectangle((m, m, m + cell, m + cell), fill=fg_hex)
+            d.rectangle((m + cell + 8, m, s - m, m + cell), fill="#FBBF24")
+            d.rectangle((m, m + cell + 8, m + cell, s - m), fill="#34D399")
+            d.rectangle((m + cell + 8, m + cell + 8, s - m, s - m), fill="#F87171")
+        elif kind == "logs":
+            # Prompt de terminal >_
+            d.line([(m, int(s * 0.36)), (int(s * 0.46), s // 2), (m, int(s * 0.64))], fill=fg_hex, width=lw)
+            d.line([(int(s * 0.52), int(s * 0.64)), (s - m, int(s * 0.64))], fill=fg_hex, width=lw)
+        elif kind == "bolt":
+            # Raio de ação 1-clique
+            pts = [
+                (int(s * 0.56), int(s * 0.18)),
+                (int(s * 0.28), int(s * 0.54)),
+                (int(s * 0.48), int(s * 0.54)),
+                (int(s * 0.42), int(s * 0.82)),
+                (int(s * 0.72), int(s * 0.46)),
+                (int(s * 0.52), int(s * 0.46)),
+            ]
+            d.polygon(pts, fill=fg_hex)
+
+        resample = getattr(Image, "Resampling", Image).LANCZOS
+        out = img.resize((size, size), resample)
+        return ImageTk.PhotoImage(out)
+
+    @staticmethod
+    def create_gauge_image(
+        score: Optional[int],
+        ring_color: str,
+        bg_card_hex: str,
+        track_hex: str = "#1E293B",
+        size: int = 128,
+    ) -> Optional[ImageTk.PhotoImage]:
+        """Desenha um anel medidor de saúde (Health Gauge) ultra nítido com 4x supersampling."""
+        if not HAS_PIL:
+            return None
+        scale = 4
+        s = size * scale
+        img = Image.new("RGBA", (s, s), bg_card_hex)
+        d = ImageDraw.Draw(img)
+
+        pad = int(s * 0.08)
+        width = int(s * 0.10)
+        bbox = (pad, pad, s - pad, s - pad)
+
+        # Trilho de fundo (270 graus, de 135 a 405)
+        d.arc(bbox, start=135, end=405, fill=track_hex, width=width)
+
+        # Arco de pontuação
+        if score is not None and score > 0:
+            sweep = int(270 * (max(0, min(100, score)) / 100.0))
+            d.arc(bbox, start=135, end=135 + sweep, fill=ring_color, width=width)
+        elif score is None:
+            # Arco tracejado de aguardo/indeterminado
+            d.arc(bbox, start=135, end=270, fill=ring_color, width=width)
+
+        resample = getattr(Image, "Resampling", Image).LANCZOS
+        out = img.resize((size, size), resample)
+        return ImageTk.PhotoImage(out)
 
 
 class OperationState(Enum):
@@ -180,18 +292,17 @@ class OperationState(Enum):
 class DiskRescueApp:
     def __init__(self, root: tk.Tk, auto_refresh: bool = True):
         self.root = root
-        self.root.title("DiskRescue v0.3.3 — Diagnóstico, Clonagem Resiliente & Recuperação Forense")
-        self.root.geometry("1280x850")
-        self.root.minsize(1100, 740)
+        self.root.title("DiskRescue v0.3.3 — Diagnóstico Completo 1-Clique, Clonagem Resiliente & Recuperação Forense")
+        self.root.geometry("1320x860")
+        self.root.minsize(1120, 760)
 
-        # Listas para sincronização instantânea de tema em todos os containers customizados
+        # Coleções para atualização de tema
         self._themed_cards: list[tk.Widget] = []
         self._themed_card_alts: list[tk.Widget] = []
-        self._themed_headers: list[tk.Widget] = []
-        self._themed_sidebars: list[tk.Widget] = []
-        self._themed_roots: list[tk.Widget] = []
-        self._themed_dividers: list[tk.Frame] = []
+        self._themed_dividers: list[tk.Widget] = []
         self._themed_text_widgets: list[tk.Text] = []
+        self._icon_refs: dict[str, ImageTk.PhotoImage] = {}
+        self._gauge_photo: Optional[ImageTk.PhotoImage] = None
 
         # Tema e Estilos
         self.current_theme = "dark"
@@ -238,7 +349,7 @@ class DiskRescueApp:
 
         # Navegação
         self.views: dict[str, tk.Frame] = {}
-        self.nav_buttons: dict[str, ttk.Button] = {}
+        self.nav_buttons: dict[str, tk.Widget] = {}
         self.active_view = "dashboard"
 
         # Construção da Interface
@@ -278,59 +389,71 @@ class DiskRescueApp:
                 self.app_icon_photo = ImageTk.PhotoImage(img)
                 self.root.iconphoto(True, self.app_icon_photo)
                 resample = getattr(Image, "Resampling", Image).LANCZOS
-                header_img = img.resize((36, 36), resample)
+                header_img = img.resize((38, 38), resample)
                 self.header_logo_photo = ImageTk.PhotoImage(header_img)
         except Exception:
             pass
+
+        # Pré-gera ícones vetoriais coloridos anti-aliased
+        nav_specs = [
+            ("dashboard", "#0EA5E9"),
+            ("diagnostic", "#8B5CF6"),
+            ("smart", "#10B981"),
+            ("clone", "#3B82F6"),
+            ("carver", "#F59E0B"),
+            ("surface", "#EC4899"),
+            ("logs", "#64748B"),
+            ("bolt", "#0284C7"),
+        ]
+        for key, color in nav_specs:
+            ic = VectorFactory.create_nav_icon(key, color, "#FFFFFF", size=22)
+            if ic is not None:
+                self._icon_refs[key] = ic
 
     # ── SISTEMA DE ESTILOS TTK CUSTOMIZADO ────────────────────────────────────
     def _configure_custom_styles(self):
         p = self.palette
         style = ttk.Style(self.root)
 
-        # Frames principais
         style.configure("Root.TFrame", background=p["bg_root"])
         style.configure("Header.TFrame", background=p["bg_header"])
         style.configure("Sidebar.TFrame", background=p["bg_sidebar"])
         style.configure("Card.TFrame", background=p["bg_card"])
         style.configure("CardAlt.TFrame", background=p["bg_card_alt"])
+        style.configure("Hero.TFrame", background=p["bg_hero"])
 
-        # Labels contextuais
         style.configure("HeaderTitle.TLabel", background=p["bg_header"], foreground=p["text_primary"], font=("Segoe UI Semibold", 15, "bold"))
         style.configure("HeaderSub.TLabel", background=p["bg_header"], foreground=p["text_secondary"], font=("Segoe UI", 8))
         style.configure("SidebarSection.TLabel", background=p["bg_sidebar"], foreground=p["text_muted"], font=("Segoe UI Semibold", 8, "bold"))
-        style.configure("CardTitle.TLabel", background=p["bg_card"], foreground=p["text_primary"], font=("Segoe UI Semibold", 10, "bold"))
+        style.configure("CardTitle.TLabel", background=p["bg_card"], foreground=p["text_primary"], font=("Segoe UI Semibold", 9, "bold"))
         style.configure("CardSub.TLabel", background=p["bg_card"], foreground=p["text_secondary"], font=("Segoe UI", 8))
         style.configure("CardBody.TLabel", background=p["bg_card"], foreground=p["text_primary"], font=("Segoe UI", 9))
         style.configure("CardMuted.TLabel", background=p["bg_card"], foreground=p["text_secondary"], font=("Segoe UI", 8))
         style.configure("AltTitle.TLabel", background=p["bg_card_alt"], foreground=p["text_primary"], font=("Segoe UI Semibold", 9, "bold"))
         style.configure("AltMuted.TLabel", background=p["bg_card_alt"], foreground=p["text_secondary"], font=("Segoe UI", 8))
-        style.configure("AltMetric.TLabel", background=p["bg_card_alt"], foreground=p["text_primary"], font=("Segoe UI Semibold", 14, "bold"))
+        style.configure("AltMetric.TLabel", background=p["bg_card_alt"], foreground=p["text_primary"], font=("Segoe UI Semibold", 13, "bold"))
         style.configure("ViewTitle.TLabel", background=p["bg_root"], foreground=p["text_primary"], font=("Segoe UI Semibold", 13, "bold"))
         style.configure("ViewSub.TLabel", background=p["bg_root"], foreground=p["text_secondary"], font=("Segoe UI", 9))
         style.configure("Status.TLabel", background=p["bg_header"], foreground=p["text_secondary"], font=("Segoe UI", 9))
 
-        # Botões da Sidebar (alinhados à esquerda com respiro moderno)
         style.configure(
             "Nav.TButton",
             font=("Segoe UI Semibold", 9),
             anchor="w",
-            padding=(12, 9),
+            padding=(10, 8),
         )
         style.configure(
-            "NavActive.TButton",
+            "Accent.TButton",
             font=("Segoe UI Semibold", 9, "bold"),
-            anchor="w",
-            padding=(12, 9),
+            padding=(12, 8),
         )
 
-        # Tabelas Treeview modernas (linhas mais altas, cabeçalho limpo)
         style.configure(
             "Treeview",
             background=p["tree_bg"],
             fieldbackground=p["tree_bg"],
             foreground=p["text_primary"],
-            rowheight=30,
+            rowheight=28,
             font=("Segoe UI", 9),
             borderwidth=0,
         )
@@ -348,18 +471,17 @@ class DiskRescueApp:
             foreground=[("selected", p["accent_soft_fg"])],
         )
 
-    # ── COMPONENTES VISUAIS REUTILIZÁVEIS (CARDS ELEVADOS & TERMINAIS) ────────
+    # ── COMPONENTES VISUAIS REUTILIZÁVEIS ─────────────────────────────────────
     def _make_card(
         self,
         parent: tk.Widget,
         title: Optional[str] = None,
         subtitle: Optional[str] = None,
         badge_text: Optional[str] = None,
-        padding: tuple[int, int] = (14, 12),
+        padding: tuple[int, int] = (14, 10),
         alt: bool = False,
         accent_top: Optional[str] = None,
     ) -> tuple[tk.Frame, ttk.Frame]:
-        """Cria um Card moderno com borda sutil de 1px, substituindo o antigo ttk.LabelFrame dos anos 90."""
         p = self.palette
         bg_color = p["bg_card_alt"] if alt else p["bg_card"]
         style_name = "CardAlt.TFrame" if alt else "Card.TFrame"
@@ -388,7 +510,7 @@ class DiskRescueApp:
 
         if title:
             hdr = ttk.Frame(inner, style=style_name)
-            hdr.pack(fill=tk.X, pady=(0, 8))
+            hdr.pack(fill=tk.X, pady=(0, 6))
 
             lbl_t = ttk.Label(hdr, text=title, style=title_style)
             lbl_t.pack(side=tk.LEFT, anchor=tk.W)
@@ -400,20 +522,19 @@ class DiskRescueApp:
                     font=("Segoe UI Semibold", 8, "bold"),
                     background=p["accent_soft_bg"],
                     foreground=p["accent_soft_fg"],
-                    padding=(6, 2),
+                    padding=(6, 1),
                 )
                 lbl_b.pack(side=tk.RIGHT, anchor=tk.E)
 
             if subtitle:
                 lbl_s = ttk.Label(inner, text=subtitle, style=sub_style, wraplength=900)
-                lbl_s.pack(anchor=tk.W, pady=(0, 8))
+                lbl_s.pack(anchor=tk.W, pady=(0, 6))
 
         body = ttk.Frame(inner, style=style_name)
         body.pack(fill=tk.BOTH, expand=True)
         return outer, body
 
     def _make_styled_text(self, parent: tk.Widget, wrap: str = tk.NONE) -> tuple[tk.Frame, tk.Text]:
-        """Cria um painel de texto/código escuro moderno com borda sutil e tags coloridas."""
         p = self.palette
         wrapper = tk.Frame(
             parent,
@@ -452,41 +573,38 @@ class DiskRescueApp:
     def _build_ui(self):
         p = self.palette
 
-        # 1. Header Superior (Barra de Título Moderna)
+        # 1. Header Superior
         self._build_top_header()
 
-        # Linha divisória sutil de 1px
         div_top = tk.Frame(self.root, bg=p["border"], height=1, bd=0, highlightthickness=0)
         div_top.pack(fill=tk.X)
         self._themed_dividers.append(div_top)
 
-        # 2. Container Central Dividido (Sidebar de Navegação + Conteúdo Dinâmico)
+        # 2. Container Central Dividido
         self.body_container = ttk.Frame(self.root, style="Root.TFrame")
         self.body_container.pack(fill=tk.BOTH, expand=True)
 
         # Sidebar à Esquerda
         self._build_sidebar()
 
-        # Divisor vertical de 1px
         div_vert = tk.Frame(self.body_container, bg=p["border"], width=1, bd=0, highlightthickness=0)
         div_vert.pack(side=tk.LEFT, fill=tk.Y)
         self._themed_dividers.append(div_vert)
 
         # Área de Conteúdo à Direita
-        self.content_area = ttk.Frame(self.body_container, style="Root.TFrame", padding=(18, 14))
+        self.content_area = ttk.Frame(self.body_container, style="Root.TFrame", padding=(16, 12))
         self.content_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Card de Seleção e Resumo do Disco Ativo (fixo no topo do conteúdo)
+        # Banner de Seleção de Disco + Botão 1-Clique Global
         self._build_drive_selector_banner()
 
         # Container onde as telas/views alternam
         self.view_container = ttk.Frame(self.content_area, style="Root.TFrame")
-        self.view_container.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        self.view_container.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
 
-        # Construir todas as telas no container
+        # Construir todas as telas
         self._build_views()
 
-        # Divisor inferior de 1px
         div_bot = tk.Frame(self.root, bg=p["border"], height=1, bd=0, highlightthickness=0)
         div_bot.pack(fill=tk.X, side=tk.BOTTOM)
         self._themed_dividers.append(div_bot)
@@ -500,10 +618,9 @@ class DiskRescueApp:
     # ── HEADER SUPERIOR ───────────────────────────────────────────────────────
     def _build_top_header(self):
         p = self.palette
-        self.header_frame = ttk.Frame(self.root, style="Header.TFrame", padding=(20, 12))
+        self.header_frame = ttk.Frame(self.root, style="Header.TFrame", padding=(18, 10))
         self.header_frame.pack(fill=tk.X, side=tk.TOP)
 
-        # Bloco da Marca / Título
         brand_box = ttk.Frame(self.header_frame, style="Header.TFrame")
         brand_box.pack(side=tk.LEFT, anchor=tk.CENTER)
 
@@ -517,16 +634,12 @@ class DiskRescueApp:
         title_row = ttk.Frame(text_stack, style="Header.TFrame")
         title_row.pack(anchor=tk.W)
 
-        app_title = ttk.Label(
-            title_row,
-            text="DiskRescue",
-            style="HeaderTitle.TLabel",
-        )
+        app_title = ttk.Label(title_row, text="DiskRescue", style="HeaderTitle.TLabel")
         app_title.pack(side=tk.LEFT, anchor=tk.CENTER)
 
         self.lbl_version_badge = ttk.Label(
             title_row,
-            text=" v0.3.3 PRO ",
+            text=" v0.3.3 SUITE FORENSE ",
             font=("Segoe UI Semibold", 8, "bold"),
             background=p["accent_soft_bg"],
             foreground=p["accent_soft_fg"],
@@ -536,20 +649,18 @@ class DiskRescueApp:
 
         app_subtitle = ttk.Label(
             text_stack,
-            text="Diagnóstico de Hardware, Clonagem Resiliente & Recuperação Forense de Partições",
+            text="Diagnóstico Profundo em 1-Clique • S.M.A.R.T. ATA/NVMe • Clonagem Resiliente • Reparo GPT/NTFS",
             style="HeaderSub.TLabel",
         )
-        app_subtitle.pack(anchor=tk.W, pady=(2, 0))
+        app_subtitle.pack(anchor=tk.W, pady=(1, 0))
 
-        # Bloco de Ações e Status do Sistema (à Direita)
         actions_box = ttk.Frame(self.header_frame, style="Header.TFrame")
         actions_box.pack(side=tk.RIGHT, anchor=tk.CENTER)
 
-        # Badge UAC
         elevated = is_admin()
         uac_bg = p["success_bg"] if elevated else p["warning_bg"]
         uac_fg = p["success_fg"] if elevated else p["warning_fg"]
-        uac_text = "🛡️ Administrador Ativo (Acesso Raw)" if elevated else "⚠️ Modo Leitura (Sem UAC)"
+        uac_text = "MODO ADMINISTRADOR (ACESSO RAW ATIVO)" if elevated else "MODO LEITURA (SEM UAC)"
 
         self.lbl_uac = ttk.Label(
             actions_box,
@@ -564,82 +675,84 @@ class DiskRescueApp:
         if not elevated:
             self.btn_elevate = ttk.Button(
                 actions_box,
-                text="⚡ Elevar UAC",
+                text="Elevar UAC",
                 command=self._on_elevate,
                 style="Accent.TButton",
-                width=12,
+                width=11,
             )
             self.btn_elevate.pack(side=tk.LEFT, padx=(0, 8))
 
-        # Botão Atualizar Discos
         self.btn_refresh = ttk.Button(
             actions_box,
-            text="🔄 Atualizar Discos",
+            text="Atualizar Discos",
             command=self.refresh_disks,
-            width=16,
+            width=15,
         )
         self.btn_refresh.pack(side=tk.LEFT, padx=(0, 8))
 
-        # Alternador de Tema
         if HAS_SV_TTK:
             self.btn_theme = ttk.Button(
                 actions_box,
-                text="🌙 Escuro",
+                text="Tema: Escuro",
                 command=self._toggle_theme,
-                width=10,
+                width=12,
             )
             self.btn_theme.pack(side=tk.LEFT)
 
-    # ── SIDEBAR DE NAVEGAÇÃO ──────────────────────────────────────────────────
+    # ── SIDEBAR DE NAVEGAÇÃO COM ÍCONES VETORIAIS COLORIDOS ───────────────────
     def _build_sidebar(self):
         p = self.palette
-        self.sidebar_frame = ttk.Frame(self.body_container, style="Sidebar.TFrame", width=240, padding=(12, 16))
+        self.sidebar_frame = ttk.Frame(self.body_container, style="Sidebar.TFrame", width=235, padding=(12, 14))
         self.sidebar_frame.pack(side=tk.LEFT, fill=tk.Y)
         self.sidebar_frame.pack_propagate(False)
 
         ttk.Label(
             self.sidebar_frame,
-            text="MÓDULOS DE OPERAÇÃO",
+            text="PAINEL DE NAVEGAÇÃO",
             style="SidebarSection.TLabel",
-        ).pack(anchor=tk.W, pady=(0, 10), padx=6)
+        ).pack(anchor=tk.W, pady=(0, 8), padx=4)
 
         nav_items = [
-            ("dashboard", "📊   Visão Geral"),
-            ("diagnostic", "🔍   Diagnóstico & Reparo"),
-            ("smart", "📈   Telemetria S.M.A.R.T."),
-            ("clone", "💾   Clonagem Resiliente"),
-            ("carver", "🔬   File Carving Forense"),
-            ("surface", "⚡   Varredura Superfície"),
-            ("logs", "📝   Console de Auditoria"),
+            ("dashboard", "Central & Diagnóstico 1-Clique"),
+            ("diagnostic", "Partições, GPT & Boot NTFS"),
+            ("smart", "Sensores S.M.A.R.T. & Cabos"),
+            ("clone", "Clonagem Resiliente (.img)"),
+            ("carver", "File Carving Forense"),
+            ("surface", "Mapa de Calor & Latência"),
+            ("logs", "Console de Auditoria"),
         ]
 
         for key, label in nav_items:
-            btn = ttk.Button(
-                self.sidebar_frame,
-                text=label,
-                command=lambda k=key: self._switch_view(k),
-                style="Nav.TButton",
-            )
+            ic = self._icon_refs.get(key)
+            btn_kwargs = {
+                "text": f"  {label}" if ic else label,
+                "command": lambda k=key: self._switch_view(k),
+                "style": "Nav.TButton",
+            }
+            if ic is not None:
+                btn_kwargs["image"] = ic
+                btn_kwargs["compound"] = tk.LEFT
+            btn = ttk.Button(self.sidebar_frame, **btn_kwargs)
             btn.pack(fill=tk.X, pady=3)
             self.nav_buttons[key] = btn
 
         # Card de Resumo do Disco no Rodapé da Sidebar
         self.mini_drive_outer, self.mini_drive_box = self._make_card(
             self.sidebar_frame,
-            title="DISPOSITIVO ATIVO",
+            title="DISCO SELECIONADO",
             padding=(12, 10),
             alt=True,
             accent_top=p["accent"],
         )
-        self.mini_drive_outer.pack(side=tk.BOTTOM, fill=tk.X, pady=(14, 0))
+        self.mini_drive_outer.pack(side=tk.BOTTOM, fill=tk.X, pady=(12, 0))
 
         self.lbl_mini_model = ttk.Label(
             self.mini_drive_box,
             text="Nenhum selecionado",
             style="AltTitle.TLabel",
-            wraplength=195,
+            wraplength=190,
         )
-        self.lbl_mini_model.pack(anchor=tk.W, pady=(0, 3))
+        self.lbl_mini_model.pack(anchor=tk.W, pady=(0, 2))
 
         self.lbl_mini_size = ttk.Label(
             self.mini_drive_box,
@@ -661,21 +774,18 @@ class DiskRescueApp:
 
         self.active_view = view_key
 
-        # Esconde todas as telas
         for v in self.views.values():
             v.pack_forget()
 
-        # Exibe a tela selecionada
         self.views[view_key].pack(fill=tk.BOTH, expand=True)
 
-        # Atualiza destaques nos botões da sidebar
         for k, btn in self.nav_buttons.items():
             if k == view_key:
                 btn.configure(style="Accent.TButton")
             else:
                 btn.configure(style="Nav.TButton")
 
-    # ── BANNER FIXO DO DISCO SELECIONADO ──────────────────────────────────────
+    # ── BANNER FIXO DO DISCO SELECIONADO + BOTÃO DE DIAGNÓSTICO 1-CLIQUE ──────
     def _build_drive_selector_banner(self):
         p = self.palette
         self.drive_banner_outer, self.drive_banner = self._make_card(
@@ -690,13 +800,26 @@ class DiskRescueApp:
 
         ttk.Label(
             top_row,
-            text="💿  Dispositivo Físico Alvo:",
+            text="UNIDADE FÍSICA ALVO:",
             style="CardTitle.TLabel",
         ).pack(side=tk.LEFT, padx=(0, 10))
 
-        self.combo_disks = ttk.Combobox(top_row, state="readonly", width=48, font=("Segoe UI", 9))
+        self.combo_disks = ttk.Combobox(top_row, state="readonly", width=44, font=("Segoe UI Semibold", 9))
         self.combo_disks.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 12))
         self.combo_disks.bind("<<ComboboxSelected>>", self._on_combo_disk_selected)
+
+        # Botão Hero Global de Diagnóstico Completo em 1 Clique
+        bolt_ic = self._icon_refs.get("bolt")
+        diag_btn_kw = {
+            "text": "  DIAGNOSTICAR TUDO (1-CLIQUE)",
+            "style": "Accent.TButton",
+            "command": self._start_full_diagnostic,
+        }
+        if bolt_ic is not None:
+            diag_btn_kw["image"] = bolt_ic
+            diag_btn_kw["compound"] = tk.LEFT
+        self.btn_full_diagnostic = ttk.Button(top_row, **diag_btn_kw)
+        self.btn_full_diagnostic.pack(side=tk.RIGHT, padx=(8, 0))
 
         self.lbl_drive_raw_badge = ttk.Label(
             top_row,
@@ -704,7 +827,7 @@ class DiskRescueApp:
             font=("Segoe UI Semibold", 8, "bold"),
             background=p["neutral_bg"],
             foreground=p["neutral_fg"],
-            padding=(10, 4),
+            padding=(10, 5),
         )
         self.lbl_drive_raw_badge.pack(side=tk.RIGHT)
 
@@ -721,181 +844,293 @@ class DiskRescueApp:
 
     # ── INSTANCIAÇÃO DAS VIEWS ────────────────────────────────────────────────
     def _build_views(self):
-        # 1. Dashboard
         self.view_dashboard = ttk.Frame(self.view_container, style="Root.TFrame")
         self.views["dashboard"] = self.view_dashboard
         self._setup_view_dashboard()
 
-        # 2. Diagnóstico & Reparo
         self.view_diagnostic = ttk.Frame(self.view_container, style="Root.TFrame")
         self.views["diagnostic"] = self.view_diagnostic
         self._setup_view_diagnostic()
 
-        # 3. SMART
         self.view_smart = ttk.Frame(self.view_container, style="Root.TFrame")
         self.views["smart"] = self.view_smart
         self._setup_view_smart()
 
-        # 4. Clonagem Resiliente
         self.view_clone = ttk.Frame(self.view_container, style="Root.TFrame")
         self.views["clone"] = self.view_clone
         self._setup_view_clone()
 
-        # 5. File Carving
         self.view_carver = ttk.Frame(self.view_container, style="Root.TFrame")
         self.views["carver"] = self.view_carver
         self._setup_view_carver()
 
-        # 6. Varredura de Superfície
         self.view_surface = ttk.Frame(self.view_container, style="Root.TFrame")
         self.views["surface"] = self.view_surface
         self._setup_view_surface()
 
-        # 7. Console de Logs
         self.view_logs = ttk.Frame(self.view_container, style="Root.TFrame")
         self.views["logs"] = self.view_logs
         self._setup_view_logs()
 
     # ══════════════════════════════════════════════════════════════════════════
-    # TELA 1: VISÃO GERAL (DASHBOARD)
+    # TELA 1: CENTRAL DE DIAGNÓSTICO COMPLETO EM 1 CLIQUE (DASHBOARD)
     # ══════════════════════════════════════════════════════════════════════════
     def _setup_view_dashboard(self):
         f = self.view_dashboard
         p = self.palette
 
-        # Cartão de Diagnóstico de Saúde e Recomendação Técnica
-        health_outer, health_box = self._make_card(
-            f,
-            title="DIAGNÓSTICO DE SAÚDE & CONDUTA RECOMENDADA",
-            badge_text="TEMPO REAL",
-            padding=(16, 12),
-        )
-        health_outer.pack(fill=tk.X, pady=(0, 10))
+        # ── SEÇÃO SUPERIOR: MEDIDOR CIRCULAR DE SAÚDE + CHECKLIST DE 6 CAMADAS ──
+        top_split = ttk.Frame(f, style="Root.TFrame")
+        top_split.pack(fill=tk.X, pady=(0, 10))
+        top_split.columnconfigure(0, weight=2)
+        top_split.columnconfigure(1, weight=3)
 
-        h_top = ttk.Frame(health_box, style="Card.TFrame")
-        h_top.pack(fill=tk.X)
+        # Card Esquerdo: Medidor de Saúde + Resumo Executivo + Botão 1-Clique
+        hero_outer, hero_box = self._make_card(
+            top_split,
+            title="LAUDO EXECUTIVO DE INTEGRIDADE DO DISCO",
+            badge_text="SCANNER 360°",
+            padding=(14, 12),
+            accent_top="#10B981",
+        )
+        hero_outer.grid(row=0, column=0, padx=(0, 6), sticky="nsew")
+
+        hero_body = ttk.Frame(hero_box, style="Card.TFrame")
+        hero_body.pack(fill=tk.BOTH, expand=True)
+
+        # Medidor Circular Anti-Aliased à esquerda do Card
+        gauge_col = ttk.Frame(hero_body, style="Card.TFrame")
+        gauge_col.pack(side=tk.LEFT, padx=(0, 14), anchor=tk.CENTER)
+
+        self.lbl_gauge_ring = ttk.Label(gauge_col, style="CardTitle.TLabel")
+        self.lbl_gauge_ring.pack(anchor=tk.CENTER)
+        self.lbl_gauge_score = ttk.Label(
+            gauge_col,
+            text="PRONTO",
+            font=("Segoe UI Semibold", 10, "bold"),
+            style="CardTitle.TLabel",
+        )
+        self.lbl_gauge_score.pack(anchor=tk.CENTER, pady=(2, 0))
+        self._update_health_gauge(None, "#38BDF8", "PRONTO")
+
+        # Coluna Direita do Card Hero (Status, Modelo, Diretriz e Botão de Varredura)
+        info_col = ttk.Frame(hero_body, style="Card.TFrame")
+        info_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self.dash_health_badge = ttk.Label(
-            h_top,
-            text="⚪ Aguardando Análise...",
-            font=("Segoe UI Semibold", 11, "bold"),
+            info_col,
+            text="Aguardando Análise...",
+            font=("Segoe UI Semibold", 10, "bold"),
             background=p["neutral_bg"],
             foreground=p["text_primary"],
-            padding=(12, 5),
+            padding=(10, 4),
         )
-        self.dash_health_badge.pack(side=tk.LEFT)
+        self.dash_health_badge.pack(anchor=tk.W)
 
         self.dash_health_title = ttk.Label(
-            h_top,
+            info_col,
             text="Selecione um disco para carregar o resumo de confiabilidade.",
             font=("Segoe UI Semibold", 11, "bold"),
             style="CardBody.TLabel",
+            wraplength=360,
         )
-        self.dash_health_title.pack(side=tk.LEFT, padx=(14, 0))
+        self.dash_health_title.pack(anchor=tk.W, pady=(6, 4))
 
         self.dash_recommendation = ttk.Label(
-            health_box,
-            text="Diretriz: O sistema analisará dados de firmware, setores e boot sectors para orientar a conduta recomendada.",
+            info_col,
+            text="Clique em 'EXECUTAR DIAGNÓSTICO COMPLETO (1-CLIQUE)' para testar sensores S.M.A.R.T., cabos SATA, partições GPT/MBR, Boot Sector NTFS e superfície física de uma só vez.",
             style="CardMuted.TLabel",
-            wraplength=960,
+            wraplength=360,
             justify=tk.LEFT,
         )
-        self.dash_recommendation.pack(anchor=tk.W, pady=(8, 0))
+        self.dash_recommendation.pack(anchor=tk.W, pady=(0, 10))
 
-        # Grade de Ações Rápidas (4 Cards Modernos com barra superior de destaque)
+        self.btn_hero_scan = ttk.Button(
+            info_col,
+            text="EXECUTAR DIAGNÓSTICO COMPLETO (1-CLIQUE)",
+            style="Accent.TButton",
+            command=self._start_full_diagnostic,
+        )
+        self.btn_hero_scan.pack(anchor=tk.W)
+
+        # Card Direito: Matriz de Verificação de Falhas em 6 Camadas (Checklist 1-Clique)
+        matrix_outer, matrix_box = self._make_card(
+            top_split,
+            title="MATRIZ DE DETECÇÃO DE FALHAS (6 CAMADAS DE HARDWARE & LÓGICA)",
+            badge_text="TEMPO REAL",
+            padding=(12, 10),
+            accent_top="#0EA5E9",
+        )
+        matrix_outer.grid(row=0, column=1, padx=(6, 0), sticky="nsew")
+
+        matrix_grid = ttk.Frame(matrix_box, style="Card.TFrame")
+        matrix_grid.pack(fill=tk.BOTH, expand=True)
+        for c in range(3):
+            matrix_grid.columnconfigure(c, weight=1)
+        for r in range(2):
+            matrix_grid.rowconfigure(r, weight=1)
+
+        self.chk_cards: dict[str, dict[str, ttk.Label]] = {}
+
+        def make_check_tile(key: str, title: str, default_status: str, default_detail: str, r: int, c: int, accent_color: str):
+            outer, tile = self._make_card(
+                matrix_grid,
+                padding=(10, 8),
+                alt=True,
+                accent_top=accent_color,
+            )
+            outer.grid(row=r, column=c, padx=4, pady=4, sticky="nsew")
+
+            top_r = ttk.Frame(tile, style="CardAlt.TFrame")
+            top_r.pack(fill=tk.X)
+
+            lbl_t = ttk.Label(top_r, text=title, style="AltTitle.TLabel")
+            lbl_t.pack(side=tk.LEFT)
+
+            lbl_badge = ttk.Label(
+                top_r,
+                text=default_status,
+                font=("Segoe UI Semibold", 7, "bold"),
+                background=p["neutral_bg"],
+                foreground=p["neutral_fg"],
+                padding=(5, 1),
+            )
+            lbl_badge.pack(side=tk.RIGHT)
+
+            lbl_det = ttk.Label(
+                tile,
+                text=default_detail,
+                style="AltMuted.TLabel",
+                wraplength=185,
+            )
+            lbl_det.pack(anchor=tk.W, pady=(4, 0))
+            self.chk_cards[key] = {"badge": lbl_badge, "detail": lbl_det}
+
+        make_check_tile("smart_surface", "1. Setores S.M.A.R.T.", "PENDENTE", "Reallocated (0x05) & Pending (0xC5)", 0, 0, "#10B981")
+        make_check_tile("cable_crc", "2. Cabo SATA & Bus", "PENDENTE", "Erros elétricos CRC UltraDMA (0xC7)", 0, 1, "#3B82F6")
+        make_check_tile("thermal_mech", "3. Térmico & Motor", "PENDENTE", "Temperatura (°C), Spin & Desgaste", 0, 2, "#F59E0B")
+        make_check_tile("partition_tbl", "4. Tabela GPT / MBR", "PENDENTE", "Assinatura 0x55AA, CRC32 & Alinhamento", 1, 0, "#8B5CF6")
+        make_check_tile("boot_mft", "5. Boot Sector & $MFT", "PENDENTE", "VBR Primário vs Backup & NTFS $MFT", 1, 1, "#EC4899")
+        make_check_tile("surface_io", "6. Leitura de Superfície", "PENDENTE", "Teste físico de Bad Sectors & Latência", 1, 2, "#0EA5E9")
+
+        # ── GRADE DE MÓDULOS DE AÇÃO RÁPIDA (4 CARDS COMPACTOS) ─────────────────
         actions_grid = ttk.Frame(f, style="Root.TFrame")
         actions_grid.pack(fill=tk.X, pady=(0, 10))
-
         for col in range(4):
             actions_grid.columnconfigure(col, weight=1)
 
-        def make_action_card(parent, title, desc, icon, c, target_view, accent_hex):
+        def make_action_card(parent, title, desc, icon_key, c, target_view, accent_hex):
             outer, card = self._make_card(
                 parent,
-                padding=(14, 12),
+                padding=(12, 9),
                 alt=True,
                 accent_top=accent_hex,
             )
-            pad_l = 0 if c == 0 else 5
-            pad_r = 0 if c == 3 else 5
+            pad_l = 0 if c == 0 else 4
+            pad_r = 0 if c == 3 else 4
             outer.grid(row=0, column=c, padx=(pad_l, pad_r), sticky="nsew")
 
-            ttk.Label(
-                card,
-                text=f"{icon}  {title}",
-                style="AltTitle.TLabel",
-            ).pack(anchor=tk.W)
+            hdr_row = ttk.Frame(card, style="CardAlt.TFrame")
+            hdr_row.pack(fill=tk.X)
+
+            ic = self._icon_refs.get(icon_key)
+            if ic is not None:
+                ttk.Label(hdr_row, image=ic, style="AltTitle.TLabel").pack(side=tk.LEFT, padx=(0, 8))
+
+            ttk.Label(hdr_row, text=title, style="AltTitle.TLabel").pack(side=tk.LEFT)
+
+            ttk.Button(
+                hdr_row,
+                text="Abrir →",
+                command=lambda: self._switch_view(target_view),
+            ).pack(side=tk.RIGHT)
 
             ttk.Label(
                 card,
                 text=desc,
                 style="AltMuted.TLabel",
-                wraplength=210,
-            ).pack(anchor=tk.W, pady=(4, 10))
-
-            btn = ttk.Button(
-                card,
-                text="Abrir Módulo →",
-                command=lambda: self._switch_view(target_view),
-            )
-            btn.pack(anchor=tk.W)
+                wraplength=260,
+            ).pack(anchor=tk.W, pady=(5, 0))
 
         make_action_card(
             actions_grid,
-            "Clonagem Segura",
-            "Crie imagem .img saltando setores defeituosos sem estressar a mídia.",
-            "💾", 0, "clone", "#0EA5E9"
+            "Clonagem Segura (.img)",
+            "Copie o disco pulando bad sectors com mapa .map atômico.",
+            "clone", 0, "clone", "#0EA5E9"
         )
         make_action_card(
             actions_grid,
-            "Análise Partições",
-            "Investigue GPT, MBR e recupere boot sectors NTFS desalinhados.",
-            "🔍", 1, "diagnostic", "#8B5CF6"
+            "Reparo GPT & Boot NTFS",
+            "Realinhe partições e restaure VBR corrompido via backup.",
+            "diagnostic", 1, "diagnostic", "#8B5CF6"
         )
         make_action_card(
             actions_grid,
-            "Resgate de Arquivos",
+            "Resgate Forense (Carving)",
             "Extraia fotos, PDFs e ZIPs diretamente dos setores brutos.",
-            "🔬", 2, "carver", "#10B981"
+            "carver", 2, "carver", "#F59E0B"
         )
         make_action_card(
             actions_grid,
-            "Teste Latência",
-            "Mapeie blocos lentos com heatmap estilo MHDD/Victoria.",
-            "⚡", 3, "surface", "#F59E0B"
+            "Heatmap de Superfície",
+            "Mapeie blocos lentos e setores ilegíveis em tempo real.",
+            "surface", 3, "surface", "#EC4899"
         )
 
-        # Tabela Resumo das Partições do Disco
+        # ── TABELA DE PARTIÇÕES E VOLUMES DETECTADOS NA MÍDIA ───────────────────
         part_outer, part_box = self._make_card(
             f,
-            title="PARTIÇÕES E VOLUMES DETECTADOS NA MÍDIA",
-            badge_text="GPT / MBR",
-            padding=(12, 10),
+            title="PARTIÇÕES E VOLUMES DETECTADOS AUTOMATICAMENTE NA MÍDIA",
+            badge_text="LEITURA LBA DIRETA",
+            padding=(12, 8),
         )
         part_outer.pack(fill=tk.BOTH, expand=True)
 
         cols = ("idx", "name", "start_lba", "end_lba", "size", "fs", "status")
-        self.dash_tree = ttk.Treeview(part_box, columns=cols, show="headings", height=6)
+        self.dash_tree = ttk.Treeview(part_box, columns=cols, show="headings", height=5)
         self.dash_tree.heading("idx", text="#")
-        self.dash_tree.heading("name", text="Nome / Rótulo")
+        self.dash_tree.heading("name", text="Nome / Rótulo da Partição")
         self.dash_tree.heading("start_lba", text="LBA Inicial")
         self.dash_tree.heading("end_lba", text="LBA Final")
         self.dash_tree.heading("size", text="Capacidade")
-        self.dash_tree.heading("fs", text="Tabela")
-        self.dash_tree.heading("status", text="Condição")
+        self.dash_tree.heading("fs", text=" Esquema ")
+        self.dash_tree.heading("status", text="Diagnóstico Estrutural")
 
         self.dash_tree.column("idx", width=40, anchor=tk.CENTER)
-        self.dash_tree.column("name", width=180, anchor=tk.W)
+        self.dash_tree.column("name", width=210, anchor=tk.W)
         self.dash_tree.column("start_lba", width=120, anchor=tk.E)
         self.dash_tree.column("end_lba", width=120, anchor=tk.E)
         self.dash_tree.column("size", width=110, anchor=tk.E)
-        self.dash_tree.column("fs", width=80, anchor=tk.CENTER)
-        self.dash_tree.column("status", width=180, anchor=tk.W)
+        self.dash_tree.column("fs", width=90, anchor=tk.CENTER)
+        self.dash_tree.column("status", width=220, anchor=tk.W)
 
         dt_scroll = ttk.Scrollbar(part_box, orient=tk.VERTICAL, command=self.dash_tree.yview)
         self.dash_tree.configure(yscrollcommand=dt_scroll.set)
         self.dash_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         dt_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def _update_health_gauge(self, score: Optional[int], color_hex: str, label_text: str):
+        p = self.palette
+        photo = VectorFactory.create_gauge_image(score, color_hex, p["bg_card"], p["border"], size=92)
+        if photo is not None:
+            self._gauge_photo = photo
+            self.lbl_gauge_ring.configure(image=photo)
+        self.lbl_gauge_score.configure(text=label_text, foreground=color_hex)
+
+    def _set_check_tile(self, key: str, status_text: str, detail_text: str, level: str = "neutral"):
+        if key not in self.chk_cards:
+            return
+        p = self.palette
+        colors = {
+            "ok": (p["success_bg"], p["success_fg"]),
+            "warn": (p["warning_bg"], p["warning_fg"]),
+            "fail": (p["danger_bg"], p["danger_fg"]),
+            "info": (p["accent_soft_bg"], p["accent_soft_fg"]),
+            "neutral": (p["neutral_bg"], p["neutral_fg"]),
+        }
+        bg, fg = colors.get(level, colors["neutral"])
+        self.chk_cards[key]["badge"].configure(text=f" {status_text} ", background=bg, foreground=fg)
+        self.chk_cards[key]["detail"].configure(text=detail_text)
 
     # ══════════════════════════════════════════════════════════════════════════
     # TELA 2: DIAGNÓSTICO & REPARO (PARTIÇÕES & BOOT)
@@ -916,20 +1151,18 @@ class DiskRescueApp:
 
         self.btn_run_scan = ttk.Button(
             action_bar,
-            text="🚀 Iniciar Varredura de Geometria",
+            text="Iniciar Varredura de Geometria & Boot Sectors",
             style="Accent.TButton",
             command=self._start_deep_scan,
         )
         self.btn_run_scan.pack(side=tk.RIGHT)
 
-        # Container dos 2 cards comparativos
         split_cards = ttk.Frame(f, style="Root.TFrame")
         split_cards.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
         split_cards.columnconfigure(0, weight=1)
         split_cards.columnconfigure(1, weight=1)
         split_cards.rowconfigure(0, weight=1)
 
-        # Card 1: Tabela Oficial (GPT / MBR)
         card_table_outer, card_table = self._make_card(
             split_cards,
             title="1. TABELA REGISTRADA NO DISCO (GPT / MBR)",
@@ -941,7 +1174,6 @@ class DiskRescueApp:
         gpt_wrap, self.txt_gpt = self._make_styled_text(card_table, wrap=tk.NONE)
         gpt_wrap.pack(fill=tk.BOTH, expand=True)
 
-        # Card 2: Assinaturas Reais na Mídia Física
         card_media_outer, card_media = self._make_card(
             split_cards,
             title="2. MÍDIA FÍSICA REAL (BOOT SECTORS & MFTs)",
@@ -953,7 +1185,6 @@ class DiskRescueApp:
         fs_wrap, self.txt_fs = self._make_styled_text(card_media, wrap=tk.NONE)
         fs_wrap.pack(fill=tk.BOTH, expand=True)
 
-        # Card 3: Ações de Resolução Cirúrgica
         self.repair_card_outer, self.repair_card = self._make_card(
             f,
             title="3. AÇÕES CIRÚRGICAS DE RESOLUÇÃO COM ROLLBACK VERIFICADO",
@@ -976,7 +1207,7 @@ class DiskRescueApp:
 
         self.btn_repair_boot = ttk.Button(
             btn_box,
-            text="🔄 Restaurar Boot Sector via Backup",
+            text="Restaurar Boot Sector via Backup",
             state=tk.DISABLED,
             command=self._execute_boot_restore,
         )
@@ -984,7 +1215,7 @@ class DiskRescueApp:
 
         self.btn_repair = ttk.Button(
             btn_box,
-            text="🛠️ Realinhar Partição GPT",
+            text="Realinhar Partição GPT",
             style="Accent.TButton",
             state=tk.DISABLED,
             command=self._execute_repair,
@@ -1017,7 +1248,6 @@ class DiskRescueApp:
         )
         self.lbl_smart_source.pack(side=tk.RIGHT)
 
-        # Grade de Métricas Principais (2 Linhas x 3 Colunas)
         metrics_grid = ttk.Frame(f, style="Root.TFrame")
         metrics_grid.pack(fill=tk.X, pady=(0, 10))
 
@@ -1040,28 +1270,25 @@ class DiskRescueApp:
             lbl.pack(anchor=tk.W, pady=(4, 0))
             return lbl
 
-        self.val_temp = make_smart_metric(metrics_grid, "🌡️ Temperatura Operacional", "-- °C", 0, 0, "#0EA5E9")
-        self.val_smart_risk = make_smart_metric(metrics_grid, "🛡️ Classificação de Risco", "--", 1, 0, "#10B981")
-        self.val_crc_err = make_smart_metric(metrics_grid, "🔌 Erros de Cabo SATA (CRC 0xC7)", "--", 2, 0, "#8B5CF6")
+        self.val_temp = make_smart_metric(metrics_grid, "Temperatura Operacional", "-- °C", 0, 0, "#0EA5E9")
+        self.val_smart_risk = make_smart_metric(metrics_grid, "Classificação de Risco", "--", 1, 0, "#10B981")
+        self.val_crc_err = make_smart_metric(metrics_grid, "Erros de Cabo SATA (CRC 0xC7)", "--", 2, 0, "#8B5CF6")
 
-        self.val_reallocated = make_smart_metric(metrics_grid, "⚠️ Setores Remapeados (0x05)", "--", 0, 1, "#F59E0B")
-        self.val_pending = make_smart_metric(metrics_grid, "⏳ Setores Pendentes (0xC5)", "--", 1, 1, "#EF4444")
-        self.val_spin = make_smart_metric(metrics_grid, "⚙️ Falhas de Partida Motor (0x0A)", "--", 2, 1, "#EC4899")
+        self.val_reallocated = make_smart_metric(metrics_grid, "Setores Remapeados (0x05)", "--", 0, 1, "#F59E0B")
+        self.val_pending = make_smart_metric(metrics_grid, "Setores Pendentes (0xC5)", "--", 1, 1, "#EF4444")
+        self.val_spin = make_smart_metric(metrics_grid, "Falhas de Partida Motor (0x0A)", "--", 2, 1, "#EC4899")
 
-        # Aviso sobre adaptadores USB e transparência técnica
         advisory_outer, advisory_box = self._make_card(f, padding=(12, 8))
         advisory_outer.pack(fill=tk.X, pady=(0, 10))
 
         ttk.Label(
             advisory_box,
-            text="ℹ️ Transparência Técnica: Pontes USB genéricas frequentemente bloqueiam registros ATA brutos. "
-                 "Quando os atributos numéricos não estão disponíveis, o sistema classifica honestamente como "
-                 "'Cinza (Indeterminado)' e exibe 'N/D', sem inventar saúde 'Verde'.",
+            text="Transparência Técnica: Pontes USB e controladoras NVMe que não expõem tabelas ATA S.M.A.R.T. tradicionais têm seus atributos ATA "
+                 "apresentados como 'N/D', utilizando-se o Diagnóstico Completo (1-Clique) para testar leitura física e geometria.",
             style="CardMuted.TLabel",
             wraplength=980,
         ).pack(anchor=tk.W)
 
-        # Card de Diagnóstico do Firmware
         self.smart_diag_outer, self.smart_diag_box = self._make_card(
             f,
             title="LAUDO DE TELEMETRIA & DIRETRIZ OPERACIONAL",
@@ -1100,7 +1327,6 @@ class DiskRescueApp:
             wraplength=980,
         ).pack(anchor=tk.W, pady=(0, 10))
 
-        # Configuração de Destino
         dest_outer, dest_card = self._make_card(
             f,
             title="ARQUIVO DE IMAGEM DE DESTINO (.IMG)",
@@ -1115,15 +1341,14 @@ class DiskRescueApp:
         self.txt_dest_image = ttk.Entry(row, font=("Segoe UI", 9))
         self.txt_dest_image.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
 
-        ttk.Button(row, text="📂 Procurar...", command=self._browse_image_dest).pack(side=tk.RIGHT)
+        ttk.Button(row, text="Procurar...", command=self._browse_image_dest).pack(side=tk.RIGHT)
 
         ttk.Label(
             dest_card,
-            text="🛡️ Barreira P0: Bloqueia automaticamente destinos no mesmo disco físico de origem e impede sobrescrita silenciosa de imagens sem mapa válido.",
+            text="Barreira P0: Bloqueia automaticamente destinos no mesmo disco físico de origem e impede sobrescrita silenciosa de imagens sem mapa válido.",
             style="CardMuted.TLabel",
         ).pack(anchor=tk.W, pady=(8, 0))
 
-        # Painel de Telemetria e Progresso
         stats_outer, stats_frame = self._make_card(
             f,
             title="TELEMETRIA DE RESGATE & CHECKPOINT ATÔMICO",
@@ -1143,7 +1368,6 @@ class DiskRescueApp:
         self.clone_progressbar = ttk.Progressbar(stats_frame, mode="determinate")
         self.clone_progressbar.pack(fill=tk.X, pady=(0, 14))
 
-        # Grade de estatísticas detalhadas
         grid_stats = ttk.Frame(stats_frame, style="Card.TFrame")
         grid_stats.pack(fill=tk.X, pady=(4, 0))
         for col in range(4):
@@ -1170,13 +1394,12 @@ class DiskRescueApp:
         self.lbl_clone_bad = make_stat_box(grid_stats, "Bad Sectors Identificados", "0", 2, "#EF4444")
         self.lbl_clone_speed = make_stat_box(grid_stats, "Taxa de Transferência", "0.0 MB/s", 3, "#8B5CF6")
 
-        # Botões de Ação
         ctrl_row = ttk.Frame(f, style="Root.TFrame")
         ctrl_row.pack(fill=tk.X, side=tk.BOTTOM)
 
         self.btn_cancel_clone = ttk.Button(
             ctrl_row,
-            text="⏸️ Interromper / Salvar Mapa (.map)",
+            text="Interromper / Salvar Mapa (.map)",
             state=tk.DISABLED,
             command=self._cancel_clone,
         )
@@ -1184,7 +1407,7 @@ class DiskRescueApp:
 
         self.btn_start_clone = ttk.Button(
             ctrl_row,
-            text="🚀 Iniciar Clonagem Resiliente",
+            text="Iniciar Clonagem Resiliente",
             style="Accent.TButton",
             command=self._start_clone,
         )
@@ -1210,7 +1433,6 @@ class DiskRescueApp:
             wraplength=980,
         ).pack(anchor=tk.W, pady=(0, 10))
 
-        # Opções e Destino
         cfg_outer, cfg_box = self._make_card(
             f,
             title="CONFIGURAÇÕES DE EXTRAÇÃO & DIRETÓRIO DE SAÍDA",
@@ -1227,9 +1449,8 @@ class DiskRescueApp:
         self.txt_carve_dir.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
         default_dir = Path.home() / "Desktop" / "DiskRescue_Recuperados"
         self.txt_carve_dir.insert(0, str(default_dir))
-        ttk.Button(row1, text="📂 Escolher Pasta...", command=self._browse_carve_dir).pack(side=tk.RIGHT)
+        ttk.Button(row1, text="Escolher Pasta...", command=self._browse_carve_dir).pack(side=tk.RIGHT)
 
-        # Filtros por Tipo de Arquivo
         filter_row = ttk.Frame(cfg_box, style="Card.TFrame")
         filter_row.pack(fill=tk.X)
 
@@ -1245,7 +1466,6 @@ class DiskRescueApp:
         ttk.Checkbutton(filter_row, text="Documentos PDF (.pdf)", variable=self.chk_pdf_var).pack(side=tk.LEFT, padx=6)
         ttk.Checkbutton(filter_row, text="Compactados ZIP/Office (.zip)", variable=self.chk_zip_var).pack(side=tk.LEFT, padx=6)
 
-        # Lista de Arquivos Resgatados
         list_outer, list_box = self._make_card(
             f,
             title="ARQUIVOS RESGATADOS EM TEMPO REAL",
@@ -1276,18 +1496,17 @@ class DiskRescueApp:
         self.carver_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         c_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Rodapé de Ações
         carve_actions = ttk.Frame(f, style="Root.TFrame")
         carve_actions.pack(fill=tk.X, side=tk.BOTTOM)
 
         self.lbl_carve_status = ttk.Label(carve_actions, text="Pronto para iniciar File Carving.", style="ViewSub.TLabel")
         self.lbl_carve_status.pack(side=tk.LEFT)
 
-        ttk.Button(carve_actions, text="📂 Abrir Pasta dos Recuperados", command=self._open_carve_folder).pack(side=tk.LEFT, padx=(14, 0))
+        ttk.Button(carve_actions, text="Abrir Pasta dos Recuperados", command=self._open_carve_folder).pack(side=tk.LEFT, padx=(14, 0))
 
         self.btn_start_carve = ttk.Button(
             carve_actions,
-            text="🔍 Iniciar Carving Forense",
+            text="Iniciar Carving Forense",
             style="Accent.TButton",
             command=self._start_carver,
         )
@@ -1295,7 +1514,7 @@ class DiskRescueApp:
 
         self.btn_cancel_carve = ttk.Button(
             carve_actions,
-            text="⏸️ Interromper Carving",
+            text="Interromper Carving",
             state=tk.DISABLED,
             command=self._cancel_carver,
         )
@@ -1321,7 +1540,6 @@ class DiskRescueApp:
             style="ViewSub.TLabel",
         ).pack(anchor=tk.W, pady=(0, 10))
 
-        # Canvas do Heatmap (Grid de blocos coloridos)
         canvas_outer, canvas_box = self._make_card(
             f,
             title="MAPA DE CALOR DE LATÊNCIA EM TEMPO REAL",
@@ -1340,7 +1558,6 @@ class DiskRescueApp:
         )
         self.surface_canvas.pack(fill=tk.BOTH, expand=True)
 
-        # Legenda e Contadores em Card
         leg_outer, legend_frame = self._make_card(f, padding=(12, 8), alt=True)
         leg_outer.pack(fill=tk.X, pady=(0, 10))
 
@@ -1360,7 +1577,6 @@ class DiskRescueApp:
         self.leg_crit = make_legend(legend_frame, "#dc2626", "Atraso Crítico: 0")
         self.leg_bad = make_legend(legend_frame, "#7f1d1d", "Bad Sector: 0")
 
-        # Barra de Ações
         surface_actions = ttk.Frame(f, style="Root.TFrame")
         surface_actions.pack(fill=tk.X, side=tk.BOTTOM)
 
@@ -1369,7 +1585,7 @@ class DiskRescueApp:
 
         self.btn_cancel_surface = ttk.Button(
             surface_actions,
-            text="⏹️ Interromper",
+            text="Interromper",
             state=tk.DISABLED,
             command=self._cancel_surface,
         )
@@ -1377,7 +1593,7 @@ class DiskRescueApp:
 
         self.btn_start_surface = ttk.Button(
             surface_actions,
-            text="⚡ Iniciar Teste de Superfície",
+            text="Iniciar Teste de Superfície",
             style="Accent.TButton",
             command=self._start_surface_scan,
         )
@@ -1409,8 +1625,8 @@ class DiskRescueApp:
         log_actions = ttk.Frame(f, style="Root.TFrame")
         log_actions.pack(fill=tk.X, side=tk.BOTTOM)
 
-        ttk.Button(log_actions, text="🧹 Limpar Log", command=lambda: self.txt_console.delete("1.0", tk.END)).pack(side=tk.LEFT)
-        ttk.Button(log_actions, text="💾 Exportar Relatório (.txt)", style="Accent.TButton", command=self._save_log_file).pack(side=tk.RIGHT)
+        ttk.Button(log_actions, text="Limpar Log", command=lambda: self.txt_console.delete("1.0", tk.END)).pack(side=tk.LEFT)
+        ttk.Button(log_actions, text="Exportar Relatório (.txt)", style="Accent.TButton", command=self._save_log_file).pack(side=tk.RIGHT)
 
     # ── BARRA DE STATUS INFERIOR ──────────────────────────────────────────────
     def _build_status_bar(self):
@@ -1433,7 +1649,6 @@ class DiskRescueApp:
         self.msg_queue.put(("status", text))
 
     def _has_active_operations(self) -> bool:
-        """Verifica se há qualquer worker ou operação de I/O ativa na aplicação."""
         return bool(
             self.is_scanning
             or self.is_surface_scanning
@@ -1443,10 +1658,6 @@ class DiskRescueApp:
         )
 
     def _on_close_window(self, confirm_if_active: bool = False):
-        """
-        Encerramento limpo e cooperativo das threads e operações ativas.
-        Não destrói a janela abruptamente enquanto workers ainda estão gravando arquivos ou salvando mapas.
-        """
         if not self._has_active_operations():
             self.is_running = False
             try:
@@ -1490,7 +1701,6 @@ class DiskRescueApp:
         self._check_close_completion()
 
     def _check_close_completion(self):
-        """Verifica periodicamente pelo event loop se todos os workers encerraram antes de destruir a janela."""
         if not getattr(self, "is_running", True):
             return
         self._process_pending_messages()
@@ -1508,7 +1718,6 @@ class DiskRescueApp:
                 pass
 
     def _resolve_ended_state(self, explicit_val):
-        """Transiciona o OperationState ao final de um worker preservando estados terminais já definidos."""
         if isinstance(explicit_val, OperationState):
             self.op_state = explicit_val
         elif self.op_state == OperationState.CANCELLING:
@@ -1517,9 +1726,7 @@ class DiskRescueApp:
             self.op_state = OperationState.IDLE
 
     def _process_pending_messages(self):
-        """Processa todas as mensagens pendentes na fila na thread principal da GUI."""
         if not getattr(self, "is_running", True):
-            # Drena eventos tardios recebidos após o encerramento sem tocar em widgets destruídos
             try:
                 while True:
                     self.msg_queue.get_nowait()
@@ -1542,6 +1749,10 @@ class DiskRescueApp:
                 elif kind == "disks_error":
                     self.lbl_status.config(text=f"Erro ao enumerar discos: {val}")
                     self.log(f"ERRO NA ENUMERAÇÃO DE DISCOS: {val}\n")
+                elif kind == "quick_partitions_loaded":
+                    gpt, mbr, disk = val
+                    if self.selected_disk and self.selected_disk.number == disk.number and not self.is_scanning:
+                        self._populate_partition_views(gpt, mbr)
                 elif kind == "scan_finished":
                     self._render_scan_results(*val)
                     if self.op_state not in (OperationState.FAILED, OperationState.CANCELLED):
@@ -1557,7 +1768,11 @@ class DiskRescueApp:
                     self.progress_bar.stop()
                     self.progress_bar.pack_forget()
                     self.btn_run_scan.config(state=tk.NORMAL)
+                    self.btn_full_diagnostic.config(state=tk.NORMAL)
+                    self.btn_hero_scan.config(state=tk.NORMAL)
                     self._resolve_ended_state(val)
+                elif kind == "full_diag_finished":
+                    self._render_full_diagnostic_verdict(*val)
                 elif kind == "smart_loaded":
                     if isinstance(val, tuple):
                         self._render_smart_results(*val)
@@ -1699,12 +1914,12 @@ class DiskRescueApp:
         if self.current_theme == "dark":
             sv_ttk.set_theme("light")
             self.current_theme = "light"
-            self.btn_theme.config(text="☀️ Claro")
+            self.btn_theme.config(text="Tema: Claro")
             _apply_windows_dwm_theme(self.root, dark=False)
         else:
             sv_ttk.set_theme("dark")
             self.current_theme = "dark"
-            self.btn_theme.config(text="🌙 Escuro")
+            self.btn_theme.config(text="Tema: Escuro")
             _apply_windows_dwm_theme(self.root, dark=True)
 
         p = self.palette
@@ -1726,6 +1941,7 @@ class DiskRescueApp:
                 selectforeground=p["text_primary"],
             )
         self.surface_canvas.configure(bg=p["bg_input"], highlightbackground=p["border"])
+        self._update_health_gauge(None, p["accent"], self.lbl_gauge_score.cget("text"))
         self._switch_view(self.active_view)
 
     def _on_elevate(self):
@@ -1752,7 +1968,7 @@ class DiskRescueApp:
         self.disks = disks
         combo_values = []
         for d in disks:
-            combo_values.append(f"[Disco {d.number}] {d.friendly_name} ({d.size_gb:.1f} GB) — {d.bus_type}")
+            combo_values.append(f"[Disco {d.number}] {d.friendly_name} ({d.size_gb:.1f} GB) — {d.media_type} {d.bus_type}")
 
         self.combo_disks["values"] = combo_values
 
@@ -1772,7 +1988,6 @@ class DiskRescueApp:
         d = self.disks[idx]
         self.selected_disk = d
 
-        # Atualiza Card Superior do Dispositivo
         raw_text = "✔ Acesso Raw Liberado" if d.can_open_raw else "✖ Acesso Raw Bloqueado"
         raw_bg = "#064E3B" if d.can_open_raw else "#7F1D1D"
         raw_fg = "#34D399" if d.can_open_raw else "#FCA5A5"
@@ -1783,21 +1998,27 @@ class DiskRescueApp:
                  f"Mídia: {d.media_type}  •  Barramento: {d.bus_type}  •  Serial: {d.serial_number or 'N/A'}"
         )
 
-        # Atualiza Mini Card da Sidebar
         self.lbl_mini_model.config(text=f"Disco {d.number}: {d.friendly_name}")
         self.lbl_mini_size.config(text=f"Tamanho: {d.size_gb:.1f} GB ({d.media_type})")
         self.lbl_mini_path.config(text=f"{d.device_path} ({d.bus_type})")
 
-        # Atualiza Header da Aba de Diagnóstico
         self.lbl_target_info.config(
             text=f"Disco Alvo: [Disco {d.number}] {d.friendly_name} ({d.size_gb:.1f} GB)",
         )
 
-        # Atualiza Dashboard Inicial
         self._update_dashboard_with_disk(d)
 
-        # Consulta Telemetria SMART em background
-        def smart_worker():
+        # Leitura instantânea de tabelas GPT/MBR (LBA 0..34) + Telemetria SMART em background
+        def init_probe_worker():
+            if d.can_open_raw:
+                try:
+                    with open(d.device_path, "rb") as f_raw:
+                        gpt = parse_gpt(f_raw)
+                        f_raw.seek(0)
+                        mbr = parse_mbr(f_raw)
+                    self.msg_queue.put(("quick_partitions_loaded", (gpt, mbr, d)))
+                except Exception:
+                    pass
             try:
                 report = query_smart_report_windows(
                     d.number,
@@ -1811,24 +2032,61 @@ class DiskRescueApp:
             except Exception as exc:
                 self.msg_queue.put(("log", f"Erro ao consultar telemetria S.M.A.R.T.: {exc}\n"))
 
-        threading.Thread(target=smart_worker, daemon=True).start()
+        threading.Thread(target=init_probe_worker, daemon=True).start()
+
+    def _populate_partition_views(self, gpt, mbr):
+        """Popula a tabela do Dashboard e a caixa GPT/MBR instantaneamente ao selecionar o disco."""
+        for item in self.dash_tree.get_children():
+            self.dash_tree.delete(item)
+        self.txt_gpt.delete("1.0", tk.END)
+
+        if gpt:
+            self.txt_gpt.insert(tk.END, f"✔ Tabela GPT Válida (CRC32 Header: {gpt.header_crc32:#x}) — {len(gpt.partitions)} partição(ões):\n\n")
+            for p in gpt.partitions:
+                self.txt_gpt.insert(tk.END, f"  • Partição {p.index}: {p.name!r}\n")
+                self.txt_gpt.insert(tk.END, f"    LBA Inicial: {p.first_lba:,} .. LBA Final: {p.last_lba:,} ({p.size_gb():.2f} GB)\n")
+                self.txt_gpt.insert(tk.END, f"    Tipo GUID: {p.type_guid}\n\n")
+                self.dash_tree.insert(
+                    "",
+                    tk.END,
+                    values=(p.index, p.name or "Sem Rótulo", f"{p.first_lba:,}", f"{p.last_lba:,}", f"{p.size_gb():.2f} GB", "GPT", "✔ CRC32 Íntegro")
+                )
+            self._set_check_tile("partition_tbl", "✔ GPT OK", f"{len(gpt.partitions)} partição(ões) GPT com CRC32 válido", "ok")
+        elif mbr and mbr.has_valid_signature:
+            self.txt_gpt.insert(tk.END, "✔ Tabela MBR Clássica Válida (Assinatura 0x55AA presente):\n\n")
+            non_empty = [p for p in mbr.partitions if not p.is_empty]
+            for p in non_empty:
+                self.txt_gpt.insert(tk.END, f"  • Partição {p.index}: [{p.type_name}]\n")
+                self.txt_gpt.insert(tk.END, f"    LBA Inicial: {p.start_lba:,} .. LBA Final: {p.end_lba:,} ({p.size_gb:.2f} GB)\n")
+                self.txt_gpt.insert(tk.END, f"    Código de Tipo: 0x{p.type_code:02X}\n\n")
+                self.dash_tree.insert(
+                    "",
+                    tk.END,
+                    values=(p.index, p.type_name, f"{p.start_lba:,}", f"{p.end_lba:,}", f"{p.size_gb:.2f} GB", "MBR", "Ativa" if p.is_bootable else "Primária")
+                )
+            self._set_check_tile("partition_tbl", "✔ MBR OK", f"{len(non_empty)} partição(ões) MBR (0x55AA válido)", "ok")
+        else:
+            self.txt_gpt.insert(tk.END, "⚠️ Tabela de partições não detectada ou assinaturas corrompidas.\n")
+            self._set_check_tile("partition_tbl", "⚠ ALERTA", "Nenhuma tabela GPT/MBR válida no LBA 0..1", "warn")
 
     def _update_dashboard_with_disk(self, d: DiskInfo):
-        # Limpa árvore de partições do dashboard
         for item in self.dash_tree.get_children():
             self.dash_tree.delete(item)
 
         self.dash_health_badge.config(
-            text=f"● Status: {d.health_status}",
+            text=f"● Status Windows: {d.health_status}",
             background="#1e293b",
             foreground="#38bdf8"
         )
         self.dash_health_title.config(
-            text=f"{d.friendly_name} ({d.size_gb:.1f} GB — {d.media_type})"
+            text=f"{d.friendly_name} ({d.size_gb:.1f} GB — {d.media_type} {d.bus_type})"
         )
         self.dash_recommendation.config(
-            text="Recomendação: Execute a 'Varredura de Geometria' para inspecionar partições e tabelas GPT/MBR."
+            text="Clique em 'EXECUTAR DIAGNÓSTICO COMPLETO (1-CLIQUE)' para inspecionar todos os setores, cabos, S.M.A.R.T., partições e boot sectors."
         )
+        self._update_health_gauge(None, "#38BDF8", "ANALISANDO")
+        for k in self.chk_cards:
+            self._set_check_tile(k, "AGUARDANDO", "Clique em Diagnosticar Tudo (1-Clique)", "neutral")
 
     # ── RENDERIZAÇÃO DA TELEMETRIA S.M.A.R.T. ─────────────────────────────────
     def _render_smart_results(self, report: SmartReport, disk: DiskInfo | None = None):
@@ -1858,7 +2116,6 @@ class DiskRescueApp:
         full_text = f"DIRETRIZ RECOMENDADA:\n{report.action_recommendation}\n\nDETALHES DO FIRMWARE:\n{lines}"
         self.lbl_smart_text.config(text=full_text)
 
-        # Determina honestamente se o dispositivo é USB para diferenciar telemetria indisponível
         target_disk = disk or self.selected_disk
         hip_str = (
             " ".join(report.hipotese_provavel).lower()
@@ -1874,20 +2131,309 @@ class DiskRescueApp:
         if target_disk:
             self.lbl_smart_source.config(text=f"Interface: {target_disk.bus_type}")
 
-        # Atualiza badge de saúde no Dashboard
+        # Atualiza os 3 primeiros cards da Matriz de 6 Camadas no Dashboard
+        if report.reallocated_sectors is not None or report.pending_sectors is not None:
+            r_s = report.reallocated_sectors or 0
+            p_s = report.pending_sectors or 0
+            if r_s == 0 and p_s == 0:
+                self._set_check_tile("smart_surface", "✔ 0 ERROS", f"Remapeados: {r_s} | Pendentes: {p_s}", "ok")
+            else:
+                self._set_check_tile("smart_surface", "✖ FALHA", f"Remapeados: {r_s} | Pendentes: {p_s}", "fail")
+        else:
+            win_rel = report.windows_reliability or {}
+            r_err = win_rel.get("ReadErrorsTotal")
+            if r_err == 0:
+                self._set_check_tile("smart_surface", "ℹ NVMe/SO", "0 erros de leitura no contador do Windows", "info")
+            else:
+                self._set_check_tile("smart_surface", "N/D ATA", "Execute o Diagnóstico 1-Clique para testar leitura", "neutral")
+
+        if report.crc_errors is not None:
+            if report.crc_errors == 0:
+                self._set_check_tile("cable_crc", "✔ CABO OK", "0 erros elétricos de CRC UltraDMA (0xC7)", "ok")
+            else:
+                self._set_check_tile("cable_crc", "⚠ RUÍDO CRC", f"{report.crc_errors} erros de cabo/porta SATA!", "warn")
+        else:
+            bus_lbl = target_disk.bus_type if target_disk else "Barramento"
+            self._set_check_tile("cable_crc", f"ℹ {bus_lbl}", f"Comunicação {bus_lbl} ativa", "info")
+
+        hrs_txt = f" | {report.power_on_hours:,}h uso" if report.power_on_hours else ""
+        if report.temperature_c is not None:
+            if report.temperature_c >= 65:
+                self._set_check_tile("thermal_mech", f"✖ {report.temperature_c} °C", f"Superaquecimento crítico{hrs_txt}", "fail")
+            elif report.temperature_c >= 55:
+                self._set_check_tile("thermal_mech", f"⚠ {report.temperature_c} °C", f"Temperatura elevada{hrs_txt}", "warn")
+            else:
+                self._set_check_tile("thermal_mech", f"✔ {report.temperature_c} °C", f"Temperatura normal{hrs_txt}", "ok")
+        else:
+            self._set_check_tile("thermal_mech", "N/D", "Sensor térmico não reportado", "neutral")
+
+        # Atualiza badge de saúde e Medidor Circular no Dashboard
         if risk_val == "Verde":
             self.dash_health_badge.config(text="● Confiável / Saudável", background="#14532d", foreground="#4ade80")
+            self._update_health_gauge(100, "#10B981", "100% OK")
         elif risk_val == "Amarelo":
             self.dash_health_badge.config(text="● Atenção / Análise Requerida", background="#78350f", foreground="#fcd34d")
+            self._update_health_gauge(65, "#F59E0B", "ATENÇÃO")
         elif risk_val == "Vermelho":
             self.dash_health_badge.config(text="● Crítico / Risco de Falha Iminente", background="#7f1d1d", foreground="#fca5a5")
+            self._update_health_gauge(20, "#EF4444", "CRÍTICO")
         else:
             if is_usb:
                 self.dash_health_badge.config(text="● Telemetria Não Disponível (Interface USB)", background="#334155", foreground="#94a3b8")
             else:
                 self.dash_health_badge.config(text="● Telemetria S.M.A.R.T. Não Disponível / Indeterminada", background="#334155", foreground="#94a3b8")
+            self._update_health_gauge(None, "#38BDF8", "1-CLIQUE")
 
         self.dash_recommendation.config(text=f"Diretriz Recomendada: {report.action_recommendation}")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # MOTOR DE DIAGNÓSTICO COMPLETO EM 1 CLIQUE (ENCONTRAR QUALQUER FALHA)
+    # ══════════════════════════════════════════════════════════════════════════
+    def _start_full_diagnostic(self):
+        """
+        Executa em 1 único clique todos os diagnósticos possíveis no HD/SSD selecionado:
+        1. Telemetria S.M.A.R.T. de Hardware (ATA WMI + Contadores NVMe/Windows)
+        2. Inspeção de Tabelas de Partição (MBR 0x55AA + GPT Primária/Backup CRC32)
+        3. Varredura de Sistemas de Arquivos, Boot Sectors (VBR Primário vs Backup) e $MFT
+        4. Teste Físico de Superfície, Latência de Setores e Detecção de Bad Sectors
+        """
+        if not self.selected_disk:
+            messagebox.showwarning("Aviso", "Selecione um disco para diagnosticar.")
+            return
+        if not self.selected_disk.can_open_raw:
+            messagebox.showerror(
+                "Erro de Permissão",
+                "Sem permissão de acesso físico direto (Raw). Clique em 'Elevar UAC' ou execute como Administrador."
+            )
+            return
+        if self.is_scanning or self.is_surface_scanning:
+            return
+
+        self._switch_view("dashboard")
+        self.is_scanning = True
+        self.is_surface_scanning = True
+        self.cancel_scan_flag = False
+        self.cancel_surface_flag = False
+        self.op_state = OperationState.RUNNING
+
+        self.btn_run_scan.config(state=tk.DISABLED)
+        self.btn_full_diagnostic.config(state=tk.DISABLED)
+        self.btn_hero_scan.config(state=tk.DISABLED)
+        self.btn_start_surface.config(state=tk.DISABLED)
+
+        self.surface_canvas.delete("all")
+        self.block_canvas_idx = 0
+
+        self.progress_bar.pack(side=tk.RIGHT, padx=10)
+        self.progress_bar.start(10)
+
+        target_disk = self.selected_disk
+        self._update_health_gauge(None, "#0EA5E9", "TESTANDO...")
+        self.set_status(f"[1/4] Consultando sensores S.M.A.R.T. e barramento do Disco {target_disk.number}...")
+        self.log(f"=== INICIANDO DIAGNÓSTICO COMPLETO 1-CLIQUE EM {target_disk.friendly_name} ({target_disk.device_path}) ===")
+
+        def worker():
+            gpt = None
+            mbr = None
+            fs_list = []
+            ntfs_boot_diag = None
+            ntfs_target_partition = None
+            smart_rep = None
+            surf_summary = None
+
+            try:
+                # ETAPA 1: S.M.A.R.T. & Sensores
+                try:
+                    smart_rep = query_smart_report_windows(
+                        target_disk.number,
+                        target_disk.device_path,
+                        target_disk.friendly_name,
+                        target_disk.serial_number,
+                        is_usb=(target_disk.bus_type.upper() == "USB"),
+                        bus_type=target_disk.bus_type,
+                    )
+                    self.msg_queue.put(("smart_loaded", (smart_rep, target_disk)))
+                    self.msg_queue.put(("log", f"[Etapa 1/4] S.M.A.R.T. consultado: {smart_rep.risk_level.value}\n"))
+                except Exception as e:
+                    self.msg_queue.put(("log", f"[Etapa 1/4] Aviso S.M.A.R.T.: {e}\n"))
+
+                # ETAPA 2: Tabelas de Partição GPT / MBR
+                self.msg_queue.put(("status", f"[2/4] Verificando tabelas GPT/MBR e CRC32 do Disco {target_disk.number}..."))
+                try:
+                    with open(target_disk.device_path, "rb") as f_raw:
+                        gpt = parse_gpt(f_raw)
+                        f_raw.seek(0)
+                        mbr = parse_mbr(f_raw)
+                except Exception as e:
+                    self.msg_queue.put(("log", f"[Etapa 2/4] Erro ao ler tabelas GPT/MBR: {e}\n"))
+
+                # ETAPA 3: Sistemas de Arquivos, Boot Sectors (VBR) & $MFT
+                self.msg_queue.put(("status", f"[3/4] Inspecionando Boot Sectors NTFS/FAT/exFAT e registros $MFT..."))
+                fs_list = scan_boot_sectors(
+                    target_disk.device_path,
+                    max_lba=300_000,
+                    cancel_check=lambda: self.cancel_scan_flag,
+                )
+
+                if not self.cancel_scan_flag:
+                    try:
+                        if gpt and gpt.partitions:
+                            for p in gpt.partitions:
+                                total_p_sectors = p.last_lba - p.first_lba + 1
+                                if total_p_sectors > 2048:
+                                    diag = diagnose_ntfs_boot_sectors(target_disk.device_path, p.first_lba, total_p_sectors)
+                                    if diag.can_repair:
+                                        ntfs_boot_diag = diag
+                                        ntfs_target_partition = (p.first_lba, total_p_sectors)
+                                        break
+                                    elif diag.primary_valid and not ntfs_boot_diag:
+                                        ntfs_boot_diag = diag
+                                        ntfs_target_partition = (p.first_lba, total_p_sectors)
+                        elif mbr and mbr.has_valid_signature:
+                            for p in mbr.partitions:
+                                if not p.is_empty and p.size_sectors > 2048:
+                                    diag = diagnose_ntfs_boot_sectors(target_disk.device_path, p.start_lba, p.size_sectors)
+                                    if diag.can_repair:
+                                        ntfs_boot_diag = diag
+                                        ntfs_target_partition = (p.start_lba, p.size_sectors)
+                                        break
+                                    elif diag.primary_valid and not ntfs_boot_diag:
+                                        ntfs_boot_diag = diag
+                                        ntfs_target_partition = (p.start_lba, p.size_sectors)
+                    except Exception as e:
+                        self.msg_queue.put(("log", f"[Etapa 3/4] Aviso na verificação VBR NTFS: {e}\n"))
+
+                self.msg_queue.put(("scan_finished", (gpt, mbr, fs_list, target_disk, ntfs_boot_diag, ntfs_target_partition)))
+
+                # ETAPA 4: Varredura Física de Superfície & Latência (Detecção de Bad Sectors)
+                self.msg_queue.put(("status", f"[4/4] Testando leitura física de superfície e latência de setores..."))
+
+                def block_cb(res: SurfaceBlockResult, summary: SurfaceScanSummary):
+                    self.msg_queue.put(("surface_block", (res, summary)))
+
+                disk_total_sectors = max(1, target_disk.size_bytes // 512)
+                surf_max = min(65_536, disk_total_sectors)
+                surf_block = min(2048, max(1, surf_max // 16))
+
+                surf_summary = scan_surface_latency(
+                    target_disk.device_path,
+                    max_sectors=surf_max,
+                    block_sectors=surf_block,
+                    progress_cb=block_cb,
+                    cancel_check=lambda: self.cancel_surface_flag or self.cancel_scan_flag,
+                )
+                self.msg_queue.put(("surface_finished", surf_summary))
+                self.msg_queue.put((
+                    "full_diag_finished",
+                    (target_disk, smart_rep, gpt, mbr, fs_list, ntfs_boot_diag, surf_summary),
+                ))
+            except Exception as exc:
+                self.msg_queue.put(("scan_error", str(exc)))
+            finally:
+                self.msg_queue.put(("surface_ended", None))
+                self.msg_queue.put(("scan_ended", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _render_full_diagnostic_verdict(
+        self,
+        disk: DiskInfo,
+        smart_rep: Optional[SmartReport],
+        gpt,
+        mbr,
+        fs_list: list[DiscoveredFilesystem],
+        ntfs_boot_diag,
+        surf_summary: Optional[SurfaceScanSummary],
+    ):
+        """Consolida os resultados das 4 etapas do Diagnóstico Completo 1-Clique no Dashboard."""
+        faults: list[str] = []
+        warnings: list[str] = []
+
+        # Avaliação Camada 5: Boot Sector & $MFT
+        if self.misaligned_pair:
+            p_idx, fs_obj = self.misaligned_pair
+            faults.append(f"Partição {p_idx} desalinhada (aponta para LBA diferente do início real NTFS em {fs_obj.start_lba:,})")
+            self._set_check_tile("boot_mft", "✖ DESALINHADO", f"Partição {p_idx} requer realinhamento GPT", "fail")
+        elif ntfs_boot_diag and ntfs_boot_diag.can_repair:
+            faults.append(f"Boot Sector NTFS primário corrompido no LBA {ntfs_boot_diag.primary_lba:,} (Backup íntegro disponível)")
+            self._set_check_tile("boot_mft", "✖ VBR CORROMPIDO", "Restaurável via Backup NTFS", "fail")
+        elif ntfs_boot_diag and ntfs_boot_diag.primary_valid:
+            self._set_check_tile("boot_mft", "✔ NTFS ÍNTEGRO", f"VBR Primário, Backup e $MFT validados", "ok")
+        elif fs_list:
+            self._set_check_tile("boot_mft", "✔ VÁLIDO", f"{len(fs_list)} volume(s) com assinatura íntegra", "ok")
+        else:
+            self._set_check_tile("boot_mft", "✔ VERIFICADO", "Nenhuma corrupção de VBR detectada", "ok")
+
+        # Avaliação Camada 6: Superfície & Bad Sectors
+        if surf_summary:
+            crit_c = getattr(surf_summary, "critical_delay_count", 0)
+            if surf_summary.bad_count > 0:
+                faults.append(f"{surf_summary.bad_count} Bad Sector(s) físico(s) ilegível(is) na amostra de superfície")
+                self._set_check_tile(
+                    "surface_io",
+                    f"✖ {surf_summary.bad_count} BAD",
+                    f"Setores ilegíveis detectados! Clone imediatamente.",
+                    "fail",
+                )
+            elif crit_c > 0 or surf_summary.very_slow_count > 0:
+                warnings.append(f"Setores lentos detectados (Atraso crítico: {crit_c}, Muito lentos: {surf_summary.very_slow_count})")
+                self._set_check_tile(
+                    "surface_io",
+                    "⚠ LENTIDÃO",
+                    f"Críticos: {crit_c} | Lentos: {surf_summary.very_slow_count}",
+                    "warn",
+                )
+            else:
+                self._set_check_tile(
+                    "surface_io",
+                    "✔ 0 BAD SECTORS",
+                    f"{surf_summary.total_tested_blocks} blocos lidos (<20ms: {surf_summary.fast_count})",
+                    "ok",
+                )
+
+        # Avaliação S.M.A.R.T.
+        if smart_rep:
+            if smart_rep.risk_level == SmartRiskLevel.RED:
+                faults.append("S.M.A.R.T. reportou risco crítico de falha física na mídia")
+            elif smart_rep.risk_level == SmartRiskLevel.YELLOW:
+                warnings.append("S.M.A.R.T. reportou alerta de atenção (verifique cabo SATA / setores)")
+
+        # Veredito Geral e Pontuação no Medidor Circular
+        if faults:
+            self._update_health_gauge(25, "#EF4444", "FALHA")
+            self.dash_health_badge.config(
+                text=f"✖ {len(faults)} FALHA(S) ENCONTRADA(S) NO DISCO",
+                background="#7F1D1D",
+                foreground="#FCA5A5",
+            )
+            self.dash_recommendation.config(
+                text="FALHAS DETECTADAS: " + " | ".join(faults) + ". Recomendação: Use Clonagem Resiliente ou Reparo Cirúrgico."
+            )
+            self.set_status(f"Diagnóstico 1-Clique concluído: {len(faults)} falha(s) encontrada(s) no Disco {disk.number}.")
+        elif warnings:
+            self._update_health_gauge(70, "#F59E0B", "ALERTA")
+            self.dash_health_badge.config(
+                text=f"⚠ ATENÇÃO: {len(warnings)} ALERTA(S) PREVENTIVO(S)",
+                background="#78350F",
+                foreground="#FCD34D",
+            )
+            self.dash_recommendation.config(
+                text="ALERTAS: " + " | ".join(warnings) + "."
+            )
+            self.set_status(f"Diagnóstico 1-Clique concluído: {len(warnings)} alerta(s) encontrado(s) no Disco {disk.number}.")
+        else:
+            self._update_health_gauge(100, "#10B981", "100% OK")
+            self.dash_health_badge.config(
+                text="✔ DIAGNÓSTICO COMPLETO: NENHUMA FALHA ENCONTRADA",
+                background="#064E3B",
+                foreground="#34D399",
+            )
+            self.dash_recommendation.config(
+                text="Laudo 1-Clique: Todas as camadas inspecionadas (S.M.A.R.T., Cabo/Barramento, Temperatura, Tabela GPT/MBR, Boot Sector/$MFT e Leitura Física de Superfície) estão íntegras e sem falhas."
+            )
+            self.set_status(f"Diagnóstico Completo 1-Clique concluído no Disco {disk.number}: 0 falhas encontradas.")
+
+        self.log(f"=== DIAGNÓSTICO 1-CLIQUE FINALIZADO: {len(faults)} falha(s), {len(warnings)} alerta(s) ===\n")
 
     # ── VARREDURA PROFUNDA DE GEOMETRIA & PARTIÇÕES ───────────────────────────
     def _start_deep_scan(self):
@@ -1927,7 +2473,6 @@ class DiskRescueApp:
                     cancel_check=lambda: self.cancel_scan_flag,
                 )
 
-                # Diagnóstico de integridade do Boot Sector NTFS nas partições candidatas
                 if not self.cancel_scan_flag:
                     try:
                         if gpt and gpt.partitions:
@@ -1992,41 +2537,8 @@ class DiskRescueApp:
         self.ntfs_boot_diag = ntfs_boot_diag
         self.ntfs_target_partition = ntfs_target_partition
 
-        # Limpa árvore de partições do Dashboard
-        for item in self.dash_tree.get_children():
-            self.dash_tree.delete(item)
+        self._populate_partition_views(gpt, mbr)
 
-        # 1. GPT e MBR
-        self.txt_gpt.delete("1.0", tk.END)
-        if gpt:
-            self.txt_gpt.insert(tk.END, f"✔ Tabela GPT Válida (CRC32 Header: {gpt.header_crc32:#x}) — {len(gpt.partitions)} partição(ões):\n\n")
-            for p in gpt.partitions:
-                self.txt_gpt.insert(tk.END, f"  • Partição {p.index}: {p.name!r}\n")
-                self.txt_gpt.insert(tk.END, f"    LBA Inicial: {p.first_lba:,} .. LBA Final: {p.last_lba:,} ({p.size_gb():.2f} GB)\n")
-                self.txt_gpt.insert(tk.END, f"    Tipo GUID: {p.type_guid}\n\n")
-
-                self.dash_tree.insert(
-                    "",
-                    tk.END,
-                    values=(p.index, p.name or "Sem Rótulo", f"{p.first_lba:,}", f"{p.last_lba:,}", f"{p.size_gb():.2f} GB", "GPT", "Registrada")
-                )
-        elif mbr and mbr.has_valid_signature:
-            self.txt_gpt.insert(tk.END, "✔ Tabela MBR Clássica Válida (Assinatura 0x55AA presente):\n\n")
-            for p in mbr.partitions:
-                if not p.is_empty:
-                    self.txt_gpt.insert(tk.END, f"  • Partição {p.index}: [{p.type_name}]\n")
-                    self.txt_gpt.insert(tk.END, f"    LBA Inicial: {p.start_lba:,} .. LBA Final: {p.end_lba:,} ({p.size_gb:.2f} GB)\n")
-                    self.txt_gpt.insert(tk.END, f"    Código de Tipo: 0x{p.type_code:02X}\n\n")
-
-                    self.dash_tree.insert(
-                        "",
-                        tk.END,
-                        values=(p.index, p.type_name, f"{p.start_lba:,}", f"{p.end_lba:,}", f"{p.size_gb:.2f} GB", "MBR", "Ativa" if p.is_bootable else "Primária")
-                    )
-        else:
-            self.txt_gpt.insert(tk.END, "⚠️ Tabela de partições não detectada ou assinaturas corrompidas.\n")
-
-        # 2. Filesystems
         self.txt_fs.delete("1.0", tk.END)
         if fs_list:
             self.txt_fs.insert(tk.END, f"✔ Encontrado(s) {len(fs_list)} sistema(s) de arquivos real(is) na mídia física:\n\n")
@@ -2038,7 +2550,6 @@ class DiskRescueApp:
         else:
             self.txt_fs.insert(tk.END, "Nenhum sistema de arquivos detectado nos setores investigados.\n")
 
-        # 3. Cruzamento e Diagnósticos de Falha
         has_misalignment = False
         if gpt and fs_list:
             for p in gpt.partitions:
@@ -2067,7 +2578,6 @@ class DiskRescueApp:
                 self.lbl_repair_diagnosis.config(text="✔ Geometria Consistente: A tabela de partições coincide com os sistemas de arquivos reais.")
             self.btn_repair.config(state=tk.DISABLED)
 
-        # Habilita ou desabilita o botão de restauração de Boot Sector NTFS
         if ntfs_boot_diag and ntfs_boot_diag.can_repair:
             self.btn_repair_boot.config(state=tk.NORMAL)
         else:
@@ -2083,7 +2593,6 @@ class DiskRescueApp:
         diag = self.ntfs_boot_diag
         part_info = self.ntfs_target_partition
 
-        # Se ainda não diagnosticado, tenta identificar partição candidata
         if not diag or not part_info:
             if self.current_gpt and self.current_gpt.partitions:
                 p = self.current_gpt.partitions[0]
@@ -2215,7 +2724,6 @@ class DiskRescueApp:
 
         target_disk = self.selected_disk
 
-        # Validação P0 de segurança
         try:
             assert_safe_source_and_destination(target_disk.device_path, Path(dest))
         except ValueError as err:
@@ -2250,7 +2758,6 @@ class DiskRescueApp:
             )
         except (FileExistsError, ValueError) as err:
             err_msg = str(err)
-            # Se for bloqueio de imagem existente sem mapa ou mapa inválido/incompatível, exige confirmação explícita
             is_overwrite_block = isinstance(err, FileExistsError) or (
                 "Operação bloqueada por segurança" in err_msg
                 or "Tamanho da imagem existente" in err_msg
@@ -2361,7 +2868,6 @@ class DiskRescueApp:
         out_path = Path(out_str)
         target_disk = self.selected_disk
 
-        # Validação P0 de segurança
         try:
             assert_safe_source_and_destination(target_disk.device_path, out_path, is_directory=True)
         except ValueError as err:
@@ -2454,7 +2960,6 @@ class DiskRescueApp:
         }
         color = colors.get(res.status, "#ef4444")
 
-        # Desenha célula moderna no Canvas com geometria responsiva
         box_size = 12
         gap = 3
         stride = box_size + gap
