@@ -78,3 +78,27 @@ def test_surface_scan_distinguishes_critical_delay_from_bad(tmp_path: Path, monk
     assert results[0].status == "critical_delay"
 
 
+def test_surface_scan_stride_spans_full_disk(tmp_path: Path):
+    """Garante que stride_sectors varre de 0% a 100% da extensão do disco distribuindo zonas."""
+    disk_file = tmp_path / "mock_stride.img"
+    # 8192 setores de 512 bytes (4 MB)
+    disk_file.write_bytes(b"\xAA" * (8192 * 512))
+
+    lbas = []
+    summary = scan_surface_latency(
+        str(disk_file),
+        start_lba=0,
+        max_sectors=8192,
+        block_sectors=256,
+        stride_sectors=2048,
+        progress_cb=lambda r, s: lbas.append(r.lba),
+    )
+
+    assert lbas == [0, 2048, 4096, 6144]
+    assert summary.total_tested_blocks == 4
+    assert summary.scanned_span_sectors == 8192
+    assert summary.current_span_sector == 8192
+    assert summary.bytes_read == 4 * 256 * 512
+
+
+

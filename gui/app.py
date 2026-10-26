@@ -938,20 +938,66 @@ class DiskRescueApp:
 
         self.dash_recommendation = ttk.Label(
             info_col,
-            text="Clique em 'EXECUTAR DIAGNÓSTICO COMPLETO (1-CLIQUE)' para testar sensores S.M.A.R.T., cabos SATA, partições GPT/MBR, Boot Sector NTFS e superfície física de uma só vez.",
+            text="Clique em 'EXECUTAR DIAGNÓSTICO COMPLETO (1-CLIQUE)' para testar sensores S.M.A.R.T., cabos SATA, partições GPT/MBR, Boot Sector NTFS e varrer de 0% a 100% da superfície física do HD.",
             style="CardMuted.TLabel",
             wraplength=360,
             justify=tk.LEFT,
         )
-        self.dash_recommendation.pack(anchor=tk.W, pady=(0, 10))
+        self.dash_recommendation.pack(anchor=tk.W, pady=(0, 6))
+
+        mode_row = ttk.Frame(info_col, style="Card.TFrame")
+        mode_row.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(mode_row, text="Profundidade:", style="CardMuted.TLabel").pack(side=tk.LEFT, padx=(0, 6))
+
+        self.scan_modes = [
+            "Profundo: Varrer Extensão Total 0% a 100% (512 Zonas Distribuídas)",
+            "Completo: Ler 100% de Todos os Setores do HD (Modo Victoria)",
+            "Rápido: S.M.A.R.T. + Partições + Boot/MFT + Início (128 MB)",
+        ]
+        self.var_scan_mode = tk.StringVar(value=self.scan_modes[0])
+        self.combo_diag_mode = ttk.Combobox(
+            mode_row,
+            textvariable=self.var_scan_mode,
+            values=self.scan_modes,
+            state="readonly",
+            width=42,
+        )
+        self.combo_diag_mode.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.diag_progressbar = ttk.Progressbar(
+            info_col,
+            mode="determinate",
+            maximum=100.0,
+            value=0.0,
+        )
+        self.diag_progressbar.pack(fill=tk.X, pady=(0, 4))
+
+        self.lbl_diag_live_telemetry = ttk.Label(
+            info_col,
+            text="Posição Física: Aguardando início (0.0% concluído)",
+            style="CardMuted.TLabel",
+            font=("Consolas", 8),
+        )
+        self.lbl_diag_live_telemetry.pack(anchor=tk.W, pady=(0, 8))
+
+        hero_btn_row = ttk.Frame(info_col, style="Card.TFrame")
+        hero_btn_row.pack(fill=tk.X)
 
         self.btn_hero_scan = ttk.Button(
-            info_col,
+            hero_btn_row,
             text="EXECUTAR DIAGNÓSTICO COMPLETO (1-CLIQUE)",
             style="Accent.TButton",
             command=self._start_full_diagnostic,
         )
-        self.btn_hero_scan.pack(anchor=tk.W)
+        self.btn_hero_scan.pack(side=tk.LEFT)
+
+        self.btn_stop_diag = ttk.Button(
+            hero_btn_row,
+            text="⏹ Parar / Concluir Laudo",
+            state=tk.DISABLED,
+            command=self._stop_full_diagnostic,
+        )
+        self.btn_stop_diag.pack(side=tk.LEFT, padx=(8, 0))
 
         # Card Direito: Matriz de Verificação de Falhas em 6 Camadas (Checklist 1-Clique)
         matrix_outer, matrix_box = self._make_card(
@@ -1583,13 +1629,22 @@ class DiskRescueApp:
         self.lbl_surface_status = ttk.Label(surface_actions, text="Pronto para testar superfície.", style="ViewSub.TLabel")
         self.lbl_surface_status.pack(side=tk.LEFT)
 
+        self.combo_surface_mode = ttk.Combobox(
+            surface_actions,
+            textvariable=self.var_scan_mode,
+            values=self.scan_modes,
+            state="readonly",
+            width=44,
+        )
+        self.combo_surface_mode.pack(side=tk.LEFT, padx=(14, 6))
+
         self.btn_cancel_surface = ttk.Button(
             surface_actions,
-            text="Interromper",
+            text="⏹ Interromper",
             state=tk.DISABLED,
             command=self._cancel_surface,
         )
-        self.btn_cancel_surface.pack(side=tk.LEFT, padx=(14, 0))
+        self.btn_cancel_surface.pack(side=tk.LEFT, padx=(6, 0))
 
         self.btn_start_surface = ttk.Button(
             surface_actions,
@@ -1770,7 +1825,15 @@ class DiskRescueApp:
                     self.btn_run_scan.config(state=tk.NORMAL)
                     self.btn_full_diagnostic.config(state=tk.NORMAL)
                     self.btn_hero_scan.config(state=tk.NORMAL)
+                    if hasattr(self, "btn_stop_diag"):
+                        self.btn_stop_diag.config(state=tk.DISABLED)
                     self._resolve_ended_state(val)
+                elif kind == "diag_progress":
+                    pct, telemetry_str = val
+                    if hasattr(self, "diag_progressbar"):
+                        self.diag_progressbar["value"] = pct
+                    if hasattr(self, "lbl_diag_live_telemetry"):
+                        self.lbl_diag_live_telemetry.config(text=telemetry_str)
                 elif kind == "full_diag_finished":
                     self._render_full_diagnostic_verdict(*val)
                 elif kind == "smart_loaded":
@@ -2189,13 +2252,44 @@ class DiskRescueApp:
     # ══════════════════════════════════════════════════════════════════════════
     # MOTOR DE DIAGNÓSTICO COMPLETO EM 1 CLIQUE (ENCONTRAR QUALQUER FALHA)
     # ══════════════════════════════════════════════════════════════════════════
+    def _compute_surface_scan_params(self, disk_total_sectors: int) -> tuple[int, int, Optional[int], str]:
+        """Calcula max_sectors, block_sectors e stride_sectors conforme o modo escolhido."""
+        if disk_total_sectors <= 65_536:
+            surf_max = max(1, disk_total_sectors)
+            surf_block = min(2048, max(1, surf_max // 16))
+            return surf_max, surf_block, None, "Sequencial Integral"
+
+        mode_str = self.var_scan_mode.get() if hasattr(self, "var_scan_mode") else ""
+        if "Completo" in mode_str:
+            surf_max = disk_total_sectors
+            surf_block = 16_384  # Blocos de 8 MB sequenciais em 100% do disco
+            return surf_max, surf_block, None, "100% Setor a Setor (Extensão Total)"
+        elif "Rápido" in mode_str:
+            surf_max = min(262_144, disk_total_sectors)  # 128 MB iniciais
+            surf_block = 2048  # Blocos de 1 MB
+            return surf_max, surf_block, None, "Triagem Rápida (128 MB Iniciais)"
+        else:
+            surf_max = disk_total_sectors
+            surf_block = 4096  # 2 MB por zona física (512 zonas = 1 GB distribuído do início ao fim do HD)
+            surf_stride = max(surf_block, disk_total_sectors // 512)
+            return surf_max, surf_block, surf_stride, "Extensão Total 0% a 100% (512 Zonas)"
+
+    def _stop_full_diagnostic(self):
+        """Interrompe cooperativamente a varredura de superfície e gera o laudo imediato com os dados coletados."""
+        self.cancel_surface_flag = True
+        self.cancel_scan_flag = True
+        if hasattr(self, "btn_stop_diag"):
+            self.btn_stop_diag.config(state=tk.DISABLED)
+        self.set_status("Finalizando leitura atual e consolidando laudo diagnóstico...")
+        self.log("Interrupção solicitada pelo usuário: gerando laudo com os blocos físicos já inspecionados.\n")
+
     def _start_full_diagnostic(self):
         """
         Executa em 1 único clique todos os diagnósticos possíveis no HD/SSD selecionado:
         1. Telemetria S.M.A.R.T. de Hardware (ATA WMI + Contadores NVMe/Windows)
         2. Inspeção de Tabelas de Partição (MBR 0x55AA + GPT Primária/Backup CRC32)
         3. Varredura de Sistemas de Arquivos, Boot Sectors (VBR Primário vs Backup) e $MFT
-        4. Teste Físico de Superfície, Latência de Setores e Detecção de Bad Sectors
+        4. Teste Físico de Superfície, Latência de Setores e Detecção de Bad Sectors (0% a 100%)
         """
         if not self.selected_disk:
             messagebox.showwarning("Aviso", "Selecione um disco para diagnosticar.")
@@ -2220,6 +2314,10 @@ class DiskRescueApp:
         self.btn_full_diagnostic.config(state=tk.DISABLED)
         self.btn_hero_scan.config(state=tk.DISABLED)
         self.btn_start_surface.config(state=tk.DISABLED)
+        if hasattr(self, "btn_stop_diag"):
+            self.btn_stop_diag.config(state=tk.NORMAL)
+        if hasattr(self, "diag_progressbar"):
+            self.diag_progressbar["value"] = 0.0
 
         self.surface_canvas.delete("all")
         self.block_canvas_idx = 0
@@ -2228,7 +2326,7 @@ class DiskRescueApp:
         self.progress_bar.start(10)
 
         target_disk = self.selected_disk
-        self._update_health_gauge(None, "#0EA5E9", "TESTANDO...")
+        self._update_health_gauge(None, "#0EA5E9", "0%")
         self.set_status(f"[1/4] Consultando sensores S.M.A.R.T. e barramento do Disco {target_disk.number}...")
         self.log(f"=== INICIANDO DIAGNÓSTICO COMPLETO 1-CLIQUE EM {target_disk.friendly_name} ({target_disk.device_path}) ===")
 
@@ -2243,6 +2341,7 @@ class DiskRescueApp:
 
             try:
                 # ETAPA 1: S.M.A.R.T. & Sensores
+                self.msg_queue.put(("diag_progress", (2.0, "Etapa 1/4: Lendo registradores S.M.A.R.T. e barramento físico...")))
                 try:
                     smart_rep = query_smart_report_windows(
                         target_disk.number,
@@ -2258,6 +2357,7 @@ class DiskRescueApp:
                     self.msg_queue.put(("log", f"[Etapa 1/4] Aviso S.M.A.R.T.: {e}\n"))
 
                 # ETAPA 2: Tabelas de Partição GPT / MBR
+                self.msg_queue.put(("diag_progress", (5.0, "Etapa 2/4: Validando assinatura MBR (0x55AA) e CRC32 das tabelas GPT...")))
                 self.msg_queue.put(("status", f"[2/4] Verificando tabelas GPT/MBR e CRC32 do Disco {target_disk.number}..."))
                 try:
                     with open(target_disk.device_path, "rb") as f_raw:
@@ -2268,6 +2368,7 @@ class DiskRescueApp:
                     self.msg_queue.put(("log", f"[Etapa 2/4] Erro ao ler tabelas GPT/MBR: {e}\n"))
 
                 # ETAPA 3: Sistemas de Arquivos, Boot Sectors (VBR) & $MFT
+                self.msg_queue.put(("diag_progress", (8.0, "Etapa 3/4: Inspecionando Boot Sectors Primário/Backup e registros $MFT...")))
                 self.msg_queue.put(("status", f"[3/4] Inspecionando Boot Sectors NTFS/FAT/exFAT e registros $MFT..."))
                 fs_list = scan_boot_sectors(
                     target_disk.device_path,
@@ -2306,19 +2407,23 @@ class DiskRescueApp:
                 self.msg_queue.put(("scan_finished", (gpt, mbr, fs_list, target_disk, ntfs_boot_diag, ntfs_target_partition)))
 
                 # ETAPA 4: Varredura Física de Superfície & Latência (Detecção de Bad Sectors)
-                self.msg_queue.put(("status", f"[4/4] Testando leitura física de superfície e latência de setores..."))
+                disk_total_sectors = max(1, target_disk.size_bytes // 512)
+                surf_max, surf_block, surf_stride, mode_desc = self._compute_surface_scan_params(disk_total_sectors)
+                total_gb = (surf_max * 512) / (1024 ** 3)
+                self.msg_queue.put((
+                    "log",
+                    f"[Etapa 4/4] Iniciando teste físico de superfície ({mode_desc}) cobrindo {total_gb:.1f} GB ({surf_max:,} setores)...\n",
+                ))
+                self.msg_queue.put(("status", f"[4/4] Varrendo superfície física ({mode_desc}) — 0.0% de {total_gb:.1f} GB..."))
 
                 def block_cb(res: SurfaceBlockResult, summary: SurfaceScanSummary):
                     self.msg_queue.put(("surface_block", (res, summary)))
-
-                disk_total_sectors = max(1, target_disk.size_bytes // 512)
-                surf_max = min(65_536, disk_total_sectors)
-                surf_block = min(2048, max(1, surf_max // 16))
 
                 surf_summary = scan_surface_latency(
                     target_disk.device_path,
                     max_sectors=surf_max,
                     block_sectors=surf_block,
+                    stride_sectors=surf_stride,
                     progress_cb=block_cb,
                     cancel_check=lambda: self.cancel_surface_flag or self.cancel_scan_flag,
                 )
@@ -2367,12 +2472,33 @@ class DiskRescueApp:
         # Avaliação Camada 6: Superfície & Bad Sectors
         if surf_summary:
             crit_c = getattr(surf_summary, "critical_delay_count", 0)
+            read_mb = getattr(surf_summary, "bytes_read", 0) / (1024 * 1024)
+            span_gb = (getattr(surf_summary, "current_span_sector", 0) * 512) / (1024 ** 3)
+            tot_span_gb = (getattr(surf_summary, "scanned_span_sectors", 0) * 512) / (1024 ** 3)
+            avg_ms = getattr(surf_summary, "avg_latency_ms", 0.0)
+            max_ms = getattr(surf_summary, "max_latency_ms", 0.0)
+            spd_mbs = getattr(surf_summary, "speed_mb_s", 0.0)
+
+            if hasattr(self, "diag_progressbar"):
+                pct_done = (getattr(surf_summary, "current_span_sector", 0) / max(1, getattr(surf_summary, "scanned_span_sectors", 1))) * 100.0
+                self.diag_progressbar["value"] = min(100.0, pct_done)
+            if hasattr(self, "lbl_diag_live_telemetry"):
+                self.lbl_diag_live_telemetry.config(
+                    text=(
+                        f"Concluído: {span_gb:.1f}/{tot_span_gb:.1f} GB varridos • "
+                        f"Lidos: {read_mb:.0f} MB ({surf_summary.total_tested_blocks} blocos) • "
+                        f"Vel: {spd_mbs:.1f} MB/s • Lat. Méd/Máx: {avg_ms:.1f}/{max_ms:.1f} ms"
+                    )
+                )
+
             if surf_summary.bad_count > 0:
-                faults.append(f"{surf_summary.bad_count} Bad Sector(s) físico(s) ilegível(is) na amostra de superfície")
+                bad_list = getattr(surf_summary, "bad_lbas", [])
+                first_bad = f" (1º em LBA {bad_list[0]:,})" if bad_list else ""
+                faults.append(f"{surf_summary.bad_count} Bad Sector(s) físico(s) ilegível(is){first_bad}")
                 self._set_check_tile(
                     "surface_io",
                     f"✖ {surf_summary.bad_count} BAD",
-                    f"Setores ilegíveis detectados! Clone imediatamente.",
+                    f"Ilegíveis{first_bad}! Clone imediatamente.",
                     "fail",
                 )
             elif crit_c > 0 or surf_summary.very_slow_count > 0:
@@ -2380,14 +2506,14 @@ class DiskRescueApp:
                 self._set_check_tile(
                     "surface_io",
                     "⚠ LENTIDÃO",
-                    f"Críticos: {crit_c} | Lentos: {surf_summary.very_slow_count}",
+                    f"Críticos: {crit_c} | Lentos: {surf_summary.very_slow_count} (Máx {max_ms:.0f}ms)",
                     "warn",
                 )
             else:
                 self._set_check_tile(
                     "surface_io",
                     "✔ 0 BAD SECTORS",
-                    f"{surf_summary.total_tested_blocks} blocos lidos (<20ms: {surf_summary.fast_count})",
+                    f"{surf_summary.total_tested_blocks} zonas ({span_gb:.1f} GB) • Méd {avg_ms:.1f}ms / {spd_mbs:.0f} MB/s",
                     "ok",
                 )
 
@@ -2930,6 +3056,9 @@ class DiskRescueApp:
         target_disk = self.selected_disk
         self.block_canvas_idx = 0
 
+        disk_total_sectors = max(1, target_disk.size_bytes // 512)
+        surf_max, surf_block, surf_stride, mode_desc = self._compute_surface_scan_params(disk_total_sectors)
+
         def block_cb(res: SurfaceBlockResult, summary: SurfaceScanSummary):
             self.msg_queue.put(("surface_block", (res, summary)))
 
@@ -2937,7 +3066,9 @@ class DiskRescueApp:
             try:
                 summary = scan_surface_latency(
                     target_disk.device_path,
-                    max_sectors=100_000,
+                    max_sectors=surf_max,
+                    block_sectors=surf_block,
+                    stride_sectors=surf_stride,
                     progress_cb=block_cb,
                     cancel_check=lambda: self.cancel_surface_flag
                 )
@@ -2978,9 +3109,43 @@ class DiskRescueApp:
         crit_count = getattr(summary, "critical_delay_count", 0)
         self.leg_crit.config(text=f"Atraso Crítico: {crit_count}")
         self.leg_bad.config(text=f"Bad Sector: {summary.bad_count}")
-        self.lbl_surface_status.config(
-            text=f"Blocos Testados: {summary.total_tested_blocks:,} | LBA: {res.lba:,} | Latência: {res.latency_ms:.1f} ms"
+
+        cur_span = getattr(summary, "current_span_sector", res.lba)
+        tot_span = max(1, getattr(summary, "scanned_span_sectors", max(1, cur_span)))
+        pct = min(100.0, (cur_span / tot_span) * 100.0)
+        cur_gb = (cur_span * 512) / (1024 ** 3)
+        tot_gb = (tot_span * 512) / (1024 ** 3)
+        spd = getattr(summary, "speed_mb_s", 0.0)
+
+        live_str = (
+            f"Posição: {cur_gb:.1f}/{tot_gb:.1f} GB ({pct:.1f}%) • "
+            f"LBA: {res.lba:,} • Vel: {spd:.1f} MB/s • "
+            f"Latência: {res.latency_ms:.1f} ms • Blocos: {summary.total_tested_blocks:,} (Bad: {summary.bad_count})"
         )
+        self.lbl_surface_status.config(text=live_str)
+
+        if hasattr(self, "diag_progressbar"):
+            self.diag_progressbar["value"] = pct
+        if hasattr(self, "lbl_diag_live_telemetry"):
+            self.lbl_diag_live_telemetry.config(text=live_str)
+        if self.is_scanning and hasattr(self, "lbl_gauge_score"):
+            self.lbl_gauge_score.config(text=f"{pct:.0f}%")
+        if self.is_scanning:
+            self.lbl_status.config(text=f"[4/4] Varrendo superfície física: {live_str}")
+            if summary.bad_count > 0:
+                self._set_check_tile(
+                    "surface_io",
+                    f"✖ {summary.bad_count} BAD",
+                    f"Lendo {cur_gb:.1f}/{tot_gb:.1f} GB ({pct:.0f}%) • {spd:.0f} MB/s",
+                    "fail",
+                )
+            else:
+                self._set_check_tile(
+                    "surface_io",
+                    f"LENDO {pct:.0f}%",
+                    f"{cur_gb:.1f}/{tot_gb:.1f} GB • {res.latency_ms:.1f}ms • {spd:.0f} MB/s",
+                    "info",
+                )
 
     def _cancel_surface(self):
         self.cancel_surface_flag = True
