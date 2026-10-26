@@ -19,19 +19,26 @@ A aplicação conta com uma interface desktop moderna no padrão **Windows 11 Fl
 > **Nota de Governança de Versão:**
 > * **Última Release Oficial Publicada no GitHub:** `v0.3.2` (`32,772,109` bytes, SHA-256 `F37801262B94D03D1A442126A88311BCBA86AA94FB5B65624418CC65B54443E4`).
 > * **Versão Local Validada (Candidata Local):** `v0.3.3` (`33,868,932` bytes / ~32.30 MB, SHA-256 `5076B3B1087BB97B2A30B476C9BD2F9FC4A7A85CF7DCF8AF8506EB34B7A169E1`, 120/120 testes aprovados).
+> * **Instalador Oficial para Windows (Setup Wizard):** `DiskRescue-Setup-v0.3.3.exe` (`35,421,731` bytes / ~33.78 MB, SHA-256 `0D89630D676971ABD4D6AC18CE4ABDB7AE3EF386F1585809B14F934B140568AE`).
 
 Baixe a última release oficial publicada no GitHub:
 👉 **[Baixar DiskRescue v0.3.2 (Release Oficial Publicada)](https://github.com/Kaio-Comk/Disk-Rescue/releases/latest)**
 
-* **Portátil e Autônomo:** Não requer instalação de Python nem dependências externas.
+* **Opções de Distribuição Profissional:**
+  * **Instalador Oficial (`DiskRescue-Setup-v0.3.3.exe`):** Assistente de instalação completo padrão Windows (Inno Setup 6). Instala em `Program Files\DiskRescue`, cria atalhos no Menu Iniciar e na Área de Trabalho com o ícone oficial, registra o desinstalador em *Aplicativos Instalados* do Windows (`unins000.exe`) e oferece inicialização automática.
+  * **Executável Portátil Autônomo (`DiskRescue.exe`):** Não requer instalação nem dependências externas.
 * **Integridade Criptográfica (SHA-256):**
+  * **Instalador Windows (`DiskRescue-Setup-v0.3.3.exe` — 35,421,731 bytes):**
+    ```text
+    0D89630D676971ABD4D6AC18CE4ABDB7AE3EF386F1585809B14F934B140568AE
+    ```
+  * **Build Local Portátil (`v0.3.3` candidata local — 33,868,932 bytes):**
+    ```text
+    5076B3B1087BB97B2A30B476C9BD2F9FC4A7A85CF7DCF8AF8506EB34B7A169E1
+    ```
   * **Release Publicada (`v0.3.2` — 32,772,109 bytes):**
     ```text
     F37801262B94D03D1A442126A88311BCBA86AA94FB5B65624418CC65B54443E4
-    ```
-  * **Build Local Validado (`v0.3.3` candidata local — 33,868,932 bytes):**
-    ```text
-    5076B3B1087BB97B2A30B476C9BD2F9FC4A7A85CF7DCF8AF8506EB34B7A169E1
     ```
 * **Elevação UAC Automática:** Manifest embutido solicita privilégios de Administrador ao iniciar, garantindo acesso direto de baixo nível (`\\.\PhysicalDriveX`).
 * **Identidade Visual Nativa:** Ícone `.ico` oficial embutido no executável (resoluções de 16x16 a 256x256).
