@@ -29,6 +29,8 @@ PrivilegesRequired=admin
 ArchitecturesInstallIn64BitMode=x64compatible
 DisableProgramGroupPage=yes
 ShowLanguageDialog=auto
+CloseApplications=yes
+RestartApplications=no
 
 [Languages]
 Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortuguese.isl"
