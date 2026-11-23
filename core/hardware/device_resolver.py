@@ -304,14 +304,3 @@ def assert_safe_source_and_destination(
             f"BLOQUEIO DE SEGURANÇA P0: {reason}\n"
             f"Para resgatar dados com segurança, selecione uma unidade física externa ou outro disco independente."
         )
-
-
-def recommend_safe_target(source: str | Path) -> str:
-    """Retorna recomendação contextual para o operador."""
-    drive_num = get_physical_drive_number(source)
-    if drive_num is not None:
-        return (
-            f"O disco de origem foi identificado como PhysicalDrive{drive_num}. "
-            f"Recomenda-se gravar a imagem em outro disco físico (ex: HD Externo USB ou SSD secundário)."
-        )
-    return "Recomenda-se gravar a imagem em um dispositivo de armazenamento secundário ou unidade externa."

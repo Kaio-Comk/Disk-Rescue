@@ -9,7 +9,6 @@ from __future__ import annotations
 import io
 import logging
 import os
-from pathlib import Path
 from typing import BinaryIO, Union
 
 log = logging.getLogger("diskrescue.write_blocker")
@@ -96,17 +95,3 @@ class StrictReadOnlyDeviceStream(io.RawIOBase):
         if hasattr(self._underlying, "close"):
             self._underlying.close()
         super().close()
-
-
-def open_device_strictly_read_only(device: Union[str, Path, BinaryIO]) -> BinaryIO:
-    """
-    Garante a abertura ou encapsulamento de um dispositivo exclusivamente para leitura.
-    Rejeita modos de escrita ou abre com flags de leitura explícitas.
-    """
-    if isinstance(device, (str, Path)):
-        # Sempre abre com modo "rb" binário de leitura
-        f = open(str(device), "rb")
-        return StrictReadOnlyDeviceStream(f)
-    if isinstance(device, StrictReadOnlyDeviceStream):
-        return device
-    return StrictReadOnlyDeviceStream(device)

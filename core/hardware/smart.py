@@ -435,7 +435,7 @@ def analyze_smart_data(
         )
         if surface_confirmed_zero and not has_surface_errors:
             evidencias.append(
-                f"Contadores de superfície consultados com zero erros: ID 5=0, ID 197=0"
+                "Contadores de superfície consultados com zero erros: ID 5=0, ID 197=0"
                 + (", ID 198=0." if _is_known_zero(uncorrectable) else " (ID 198 não consultado).")
             )
             hipoteses.append(
@@ -627,6 +627,11 @@ def query_smart_report_windows(
     e contadores de confiabilidade do Windows (StorageReliabilityCounter), mantendo métricas do SO
     segregadas dos atributos ATA de hardware.
     """
+    # O número entra no texto do script PowerShell (rodando como administrador): só aceita inteiro de verdade.
+    if isinstance(device_number, bool) or not isinstance(device_number, int):
+        device_number = int(str(device_number).strip(), 10)   # "1" vira 1; "0; Remove-Item ..." levanta ValueError
+    if device_number < 0:
+        raise ValueError(f"número de disco inválido: {device_number}")
     script = f"""
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
     $phys = Get-PhysicalDisk | Where-Object {{ $_.DeviceId -eq '{device_number}' }} | Select-Object -First 1

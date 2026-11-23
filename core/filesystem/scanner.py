@@ -11,7 +11,7 @@ from core.filesystem.fat_exfat import (
     parse_exfat_boot_sector,
     parse_fat32_boot_sector,
 )
-from core.filesystem.ntfs import NTFSBootSector, parse_ntfs_boot_sector, verify_ntfs_mft
+from core.filesystem.ntfs import parse_ntfs_boot_sector, verify_ntfs_mft
 
 log = logging.getLogger("diskrescue.scanner")
 

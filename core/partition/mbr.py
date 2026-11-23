@@ -10,7 +10,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, List, Optional
+from typing import BinaryIO, List
 
 log = logging.getLogger("diskrescue.mbr")
 

@@ -21,7 +21,7 @@ log = logging.getLogger("diskrescue.ntfs_boot")
 def _sanitize_ntfs_device_token(device_path: str) -> str:
     """Sanitiza caminho do dispositivo para uso seguro em nomes de arquivo no Windows sem colisões."""
     raw = str(device_path).strip()
-    digest = hashlib.sha1(raw.encode("utf-8", errors="replace")).hexdigest()[:8]
+    digest = hashlib.sha1(raw.encode("utf-8", errors="replace"), usedforsecurity=False).hexdigest()[:8]  # só sufixo de nome de arquivo
     # Remove caracteres proibidos no Windows (< > : " / \ | ? * e caracteres de controle)
     cleaned = re.sub(r'[^A-Za-z0-9_-]', '_', raw).strip("_")
     while "__" in cleaned:

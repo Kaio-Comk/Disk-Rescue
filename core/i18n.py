@@ -16,7 +16,7 @@ Idiomas suportados:
 import locale
 import os
 import ctypes
-from typing import Any, Optional
+from typing import Any
 
 SUPPORTED_LANGUAGES = {
     "pt_BR": "Português (BR)",

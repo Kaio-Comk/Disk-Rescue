@@ -3,7 +3,6 @@ cli/main.py — Interface de Linha de Comando (CLI) interativa do DiskRescue v0.
 """
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 

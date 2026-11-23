@@ -347,3 +347,47 @@ def test_carver_detects_header_split_across_block_boundary(tmp_path: Path):
     assert png_res.is_structurally_valid is True
     assert png_res.saved_path.read_bytes() == png_full
 
+
+def _disco_com_png_corrompido(tmp_path: Path) -> Path:
+    """PNG with header and IEND footer (so it is carved) but a broken chunk CRC and no IHDR (so it is invalid)."""
+    disk_file = tmp_path / "disk_bad_png.img"
+    total_sectors = 100
+    bad_chunk = struct.pack(">I", 4) + b"tEXt" + b"abcd" + b"\x00\x00\x00\x00"   # CRC errado
+    png_ruim = b"\x89PNG\r\n\x1a\n" + bad_chunk + struct.pack(">I", 0) + b"IEND\xaeB`\x82"
+    disk = bytearray(total_sectors * SECTOR_SIZE)
+    disk[20 * SECTOR_SIZE: 20 * SECTOR_SIZE + len(png_ruim)] = png_ruim
+    disk_file.write_bytes(bytes(disk))
+    return disk_file
+
+
+def test_carver_isola_arquivo_corrompido_sem_enganar_nem_sobrescrever(tmp_path: Path):
+    """Auditoria final 05/11/2026: o caminho do arquivo invalido (renomear com _corrupted, nao contar como
+    resgatado, nunca sobrescrever) nao era executado por nenhum teste."""
+    disk_file = _disco_com_png_corrompido(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    ja_existia = out_dir / "recovered_0001_corrupted.png"
+    ja_existia.write_bytes(b"ARQUIVO ANTERIOR DO USUARIO")
+
+    carver = FileCarver(str(disk_file), out_dir, discard_invalid=False)
+    recovered = carver.scan(max_sectors=100, chunk_sectors=50)
+
+    assert recovered == [] and carver.valid_files == []          # nao conta como resgate valido
+    assert len(carver.corrupted_files) == 1
+    ruim = carver.corrupted_files[0]
+    assert ruim.file_type == "PNG" and ruim.is_structurally_valid is False
+    assert ruim.saved_path.exists() and ruim.saved_path.name.endswith("_corrupted.png")
+    assert ruim.saved_path != ja_existia
+    assert ja_existia.read_bytes() == b"ARQUIVO ANTERIOR DO USUARIO"   # nao sobrescreveu
+    assert not list(out_dir.glob("*.png.tmp*")) and sorted(p.name for p in out_dir.iterdir()) == sorted(
+        [ja_existia.name, ruim.saved_path.name])
+
+
+def test_carver_descarta_arquivo_corrompido_quando_pedido(tmp_path: Path):
+    disk_file = _disco_com_png_corrompido(tmp_path)
+    out_dir = tmp_path / "out"
+    carver = FileCarver(str(disk_file), out_dir, discard_invalid=True)
+    assert carver.scan(max_sectors=100, chunk_sectors=50) == []
+    assert carver.corrupted_files == []
+    assert not out_dir.exists() or list(out_dir.iterdir()) == []      # nada ficou no disco
+

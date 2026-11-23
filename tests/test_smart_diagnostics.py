@@ -384,3 +384,20 @@ def test_smart_preserves_none_raw_values_and_rejects_impossible_normalized_value
 
 
 
+
+
+def test_numero_de_disco_malicioso_nao_chega_ao_powershell(monkeypatch):
+    """O número do disco é interpolado no script PowerShell (admin): texto que não for inteiro é recusado antes."""
+    import subprocess
+
+    import pytest
+
+    from core.hardware import smart
+
+    def nao_pode_executar(*a, **k):
+        raise AssertionError("o PowerShell não deveria ser chamado")
+
+    monkeypatch.setattr(subprocess, "run", nao_pode_executar)
+    for ruim in ("0; Remove-Item C:/x", "1' | Out-File x; '", "-1", True):
+        with pytest.raises(ValueError):
+            smart.query_smart_report_windows(ruim, r"\.\PhysicalDrive0", "m", "s")

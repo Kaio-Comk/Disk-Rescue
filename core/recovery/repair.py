@@ -21,9 +21,6 @@ from core.filesystem.scanner import DiscoveredFilesystem
 from core.partition.gpt import (
     DEFAULT_SECTOR_SIZE,
     GPT_HEADER_SIGNATURE,
-    GPTPartitionEntry,
-    GPTTable,
-    create_lba_snapshot,
     parse_gpt,
     rebuild_gpt,
     rebuild_backup_gpt,
@@ -37,7 +34,7 @@ MAX_RAW_IMAGE_CHUNK_BYTES = 64 * 1024 * 1024  # Limite seguro de 64 MiB por bloc
 def _sanitize_device_token(device_path: str) -> str:
     """Gera identificador seguro para nomes de arquivos no Windows sem colisões entre dispositivos distintos."""
     raw = str(device_path).strip()
-    digest = hashlib.sha1(raw.encode("utf-8", errors="replace")).hexdigest()[:8]
+    digest = hashlib.sha1(raw.encode("utf-8", errors="replace"), usedforsecurity=False).hexdigest()[:8]  # só sufixo de nome de arquivo
     cleaned = re.sub(r"[^A-Za-z0-9_-]", "_", raw).strip("_")
     while "__" in cleaned:
         cleaned = cleaned.replace("__", "_")

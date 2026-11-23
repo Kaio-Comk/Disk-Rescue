@@ -7,15 +7,12 @@ Motor de Diagnóstico Completo em 1 Clique (SMART ATA/NVMe + Geometria GPT/MBR +
 from __future__ import annotations
 
 import ctypes
-import math
 import os
 import queue
-import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
-from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -53,16 +50,15 @@ from core.hardware.smart import SmartReport, SmartRiskLevel, query_smart_report_
 from core.hardware.surface_scan import SurfaceBlockResult, SurfaceScanSummary, scan_surface_latency
 from core.i18n import (
     SUPPORTED_LANGUAGES,
-    detect_system_language,
     get_current_language,
     set_language,
     t,
 )
-from core.partition.gpt import GPTPartitionEntry, GPTTable, parse_gpt
+from core.partition.gpt import parse_gpt
 from core.partition.mbr import parse_mbr
-from core.recovery.carver import CarvedFile, FileCarver
+from core.recovery.carver import FileCarver
 from core.recovery.repair import repair_gpt_partition_offset
-from core.recovery.resilient_clone import CloningResult, ResilientCloneStats, ResilientCloner
+from core.recovery.resilient_clone import ResilientCloneStats, ResilientCloner
 
 
 # ── PALETAS DE DESIGN FLUENT OBSIDIAN / SLATE ────────────────────────────────
@@ -2021,8 +2017,8 @@ class DiskRescueApp:
             w.configure(bg=p["bg_card_alt"], highlightbackground=p["border"])
         for d in self._themed_dividers:
             d.configure(bg=p["border"], highlightbackground=p["border"])
-        for t in self._themed_text_widgets:
-            t.configure(
+        for tw in self._themed_text_widgets:
+            tw.configure(
                 bg=p["bg_input"],
                 fg=p["text_primary"],
                 insertbackground=p["accent"],
@@ -2479,7 +2475,7 @@ class DiskRescueApp:
 
                 # ETAPA 3: Sistemas de Arquivos, Boot Sectors (VBR) & $MFT
                 self.msg_queue.put(("diag_progress", (8.0, "Etapa 3/4: Inspecionando Boot Sectors Primário/Backup e registros $MFT...")))
-                self.msg_queue.put(("status", f"[3/4] Inspecionando Boot Sectors NTFS/FAT/exFAT e registros $MFT..."))
+                self.msg_queue.put(("status", "[3/4] Inspecionando Boot Sectors NTFS/FAT/exFAT e registros $MFT..."))
                 fs_list = scan_boot_sectors(
                     target_disk.device_path,
                     max_lba=300_000,
@@ -2573,7 +2569,7 @@ class DiskRescueApp:
             faults.append(f"Boot Sector NTFS primário corrompido no LBA {ntfs_boot_diag.primary_lba:,} (Backup íntegro disponível)")
             self._set_check_tile("boot_mft", "✖ VBR CORROMPIDO", "Restaurável via Backup NTFS", "fail")
         elif ntfs_boot_diag and ntfs_boot_diag.primary_valid:
-            self._set_check_tile("boot_mft", "✔ NTFS ÍNTEGRO", f"VBR Primário, Backup e $MFT validados", "ok")
+            self._set_check_tile("boot_mft", "✔ NTFS ÍNTEGRO", "VBR Primário, Backup e $MFT validados", "ok")
         elif fs_list:
             self._set_check_tile("boot_mft", "✔ VÁLIDO", f"{len(fs_list)} volume(s) com assinatura íntegra", "ok")
         else:

@@ -6,8 +6,12 @@ on:
   pull_request:
     branches: [ "main" ]
 
+# Least privilege for the GITHUB_TOKEN: these jobs only read the code.
+permissions:
+  contents: read
 jobs:
   test:
+    timeout-minutes: 30
     runs-on: windows-latest
     strategy:
       matrix:
@@ -70,6 +74,6 @@ jobs:
       if: matrix.python-version == '3.12'
       uses: actions/upload-artifact@v4
       with:
-        name: DiskRescue-Portable-v0.3.2
+        name: DiskRescue-Portable-v0.3.3
         path: dist\DiskRescue.exe
         if-no-files-found: error

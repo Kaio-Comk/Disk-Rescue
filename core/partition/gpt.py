@@ -7,7 +7,6 @@ import logging
 import struct
 import zlib
 from dataclasses import dataclass, field
-from pathlib import Path
 
 log = logging.getLogger("diskrescue.gpt")
 
@@ -251,18 +250,3 @@ def rebuild_backup_gpt(
     struct.pack_into("<I", backup_header, 16, new_header_crc)
 
     return bytes(backup_header), bytes(entries_data), resolved_bkp_entries_lba
-
-
-def create_lba_snapshot(device_path: str, output_path: Path, sector_count: int = 34, sector_size: int = DEFAULT_SECTOR_SIZE) -> bool:
-    """Salva um backup binário exato dos primeiros setores do disco antes de qualquer alteração."""
-    try:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(device_path, "rb") as f:
-            f.seek(0)
-            data = f.read(sector_count * sector_size)
-            output_path.write_bytes(data)
-            log.info("Snapshot de LBA 0..%d salvo em %s (%d bytes)", sector_count - 1, output_path, len(data))
-            return True
-    except Exception as exc:
-        log.error("Falha ao salvar snapshot de LBA em %s: %s", output_path, exc)
-        return False

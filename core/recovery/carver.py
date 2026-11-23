@@ -9,10 +9,9 @@ import io
 import logging
 import os
 import struct
-import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Callable, List, Optional, Tuple, Union
+from typing import BinaryIO, Callable, List, Optional, Union
 
 from core.hardware.device_resolver import assert_safe_source_and_destination
 
